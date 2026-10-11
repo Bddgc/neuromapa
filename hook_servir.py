@@ -237,7 +237,7 @@ def terminos_suficientes(consulta):
 def merece_pista(resultado, cuantos):
     if not resultado.get("leerPrimero"):
         return False
-    juntas = resultado.get("juntas", JUNTAS_MINIMAS)
+    juntas = resultado.get("juntasSinPreguntas", resultado.get("juntas", JUNTAS_MINIMAS))
     relevancia = resultado.get("relevancia", RELEVANCIA_MINIMA)
     if juntas >= min(JUNTAS_MINIMAS, cuantos - 1):
         return relevancia >= RELEVANCIA_MINIMA

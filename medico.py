@@ -25,6 +25,9 @@ LINEAS_INDICE = 200
 AVISO_INDICE = 150
 BYTES_INDICE = 25000
 AVISO_BYTES_INDICE = 18750
+LARGO_RENGLON_INDICE = 220
+LARGO_GANCHO = 200
+MAS_LARGOS = 3
 DESCRIPCION_MINIMA = 30
 LARGO_CITA = 120
 TIPOS_MEMORIA = {"user", "feedback", "project", "reference"}
@@ -692,12 +695,24 @@ def linea_del_corte(ruta, tope):
     return datos[:tope].count(b"\n") + 1 if len(datos) > tope else None
 
 
+def renglones_largos(nodo):
+    salida = []
+    for numero, renglon in enumerate(nodo.get("_cuerpo", "").split("\n"), nodo.get("_desfase", 0) + 1):
+        if (len(renglon) > LARGO_RENGLON_INDICE and renglon.lstrip()[:2] in ("- ", "* ", "+ ")
+                and len(RE_ENLACE_A_NOTA.findall(renglon)) < 2):
+            salida.append((len(renglon), numero))
+    return sorted(salida, key=lambda par: (-par[0], par[1]))
+
+
 def regla_indice(cerebro):
     salida = []
     topes = f"{LINEAS_INDICE} líneas o {BYTES_INDICE // 1000} KB"
     for nodo in cerebro.nodos:
         if nodo["tipo"] != "indice":
             continue
+        largos = renglones_largos(nodo)
+        cuales = (" Los renglones más largos: " + ", ".join(f"el {n} ({letras} letras)" for letras, n in largos[:MAS_LARGOS])
+                  + ".") if largos else ""
         lineas = nodo["lineas"]
         entradas = len(cerebro.listados_por_indice.get(nodo["id"], ()))
         kb = decimal(nodo["bytes"] / 1000)
@@ -712,13 +727,20 @@ def regla_indice(cerebro):
                                    f"{texto} Claude solo lee las primeras {topes} al arrancar (lo que llegue antes): "
                                    f"{desde}.",
                                    f"Juntar entradas o acortar ganchos (con OK de {QUIEN}, "
-                                   "porque cambia lo que Claude ve al arrancar)."))
+                                   f"porque cambia lo que Claude ve al arrancar).{cuales}"))
         elif lineas >= AVISO_INDICE or nodo["bytes"] >= AVISO_BYTES_INDICE:
             salida.append(hallazgo("presupuestoIndice", nodo["id"], None, "aviso",
                                    f"{texto} Se está acercando al tope que Claude lee al arrancar.",
-                                   f"Pensar qué entradas se pueden juntar o acortar antes de llegar a {topes}."))
+                                   f"Pensar qué entradas se pueden juntar o acortar antes de llegar a {topes}.{cuales}"))
         else:
             salida.append(hallazgo("presupuestoIndice", nodo["id"], None, "info", f"{texto} Entra entero.", ""))
+        for letras, linea in largos:
+            salida.append(hallazgo("ganchoLargo", nodo["id"], linea, "revisar",
+                                   f"Este renglón del índice tiene {letras} letras. El índice se carga entero al empezar "
+                                   f"cada charla y Claude lee solo las primeras {topes}: con renglones así entran menos "
+                                   "notas.",
+                                   f"Dejar un gancho de hasta unas {LARGO_GANCHO} letras (qué es la nota y por dónde "
+                                   "retomar) y pasar el estado y el detalle a la nota."))
     for x in cerebro.indice_roto:
         indice = cerebro.por_id.get(x["indice"])
         linea = None

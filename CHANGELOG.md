@@ -3,6 +3,23 @@
 Las versiones siguen el número de `.claude-plugin/plugin.json` (`claude plugin list` lo muestra, y Claude lo ve con `neuromapa --version`). Cada versión que
 sale sube ese número; si no, la actualización puede no traer nada (ver [CONTRIBUTING.md](CONTRIBUTING.md)).
 
+## 0.1.5 — en prueba
+
+Para que la pista encuentre la nota aunque se pregunte con otras palabras:
+
+- Preguntas que responde cada nota: una nota puede decirlas en su encabezado, en una línea `preguntas:` (o
+  `questions:`), y también cuentan las de las fichas de `--fichas`. En `--sobre` y en la pista, entre las notas que ya
+  tienen que ver con el pedido sube la que dice responderlo. No agregan notas ni hacen aparecer una pista donde antes
+  no había: eso se decide igual que antes. Con las notas del autor, la nota justa pasó a aparecer en 130 de 177
+  preguntas de prueba (antes 119) y a salir primera en 92 (antes 83), con las mismas pistas en los pedidos ajenos.
+  Se apaga con `"ordenar_con_preguntas": false` en el `config.json`. `--buscar` no cambia.
+
+Para cuidar el índice de la memoria:
+
+- El médico deja «para revisar» cada renglón de `MEMORY.md` de más de 220 letras que apunta a una sola nota (regla
+  `ganchoLargo`), y cuando el índice se acerca a su tope de 25 KB nombra los tres renglones más largos. Ese archivo
+  se carga entero al empezar cada charla: con renglones largos entran menos notas.
+
 ## 0.1.4 — en prueba
 
 Para ordenar la memoria cuando crece:

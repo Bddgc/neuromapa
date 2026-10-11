@@ -28,6 +28,8 @@ PESO_RAIZ = 0.8
 PESO_TIPO = {"instrucciones": 1.6}
 PESO_ARCHIVO = 0.95
 PESO_TARJETA = 1.0
+PESO_PREGUNTAS = 0.75
+CLAVES_PREGUNTAS = ("preguntas", "questions")
 LARGO_PREFIJO = 6
 EXTRA_MINIMO = 2
 LARGO_IDENTIFICADOR = 8
@@ -173,7 +175,7 @@ VIDA_INDICE = 15 * 60
 ESPERA_INDICE = 6.0
 REARMANDO = "rearmando-indice.txt"
 ESPERA_REARMADO = 120
-VERSION_INDICE = 5
+VERSION_INDICE = 6
 MODULOS_DEL_INDICE = ("cerebro.py", "buscador.py", "medico.py", "configuracion.py", "textos.py", "archivos.py",
                       "entidades.py", "donde.py", "fichas.py")
 _formas_de = {}
@@ -553,10 +555,13 @@ class Indice:
         self.largos_ficha = []
         self.tarjetas = {}
         self.largos_tarjeta = []
+        self.preguntas = {}
+        self.largos_pregunta = []
         numero_de = {}
         proyectos = proyectos_de_notas(cerebro)
         import fichas
         de_claude = fichas.leer()["fichas"] if PESO_TARJETA else {}
+        con_preguntas = bool(PESO_PREGUNTAS) and nucleo.CONFIG.get("ordenar_con_preguntas", True)
         for nodo in cerebro.nodos:
             n = len(self.notas)
             numero_de[nodo["id"]] = n
@@ -585,6 +590,12 @@ class Indice:
             self.largos_tarjeta.append(sum(cuenta.values()))
             for termino, veces in cuenta.items():
                 self.tarjetas.setdefault(termino, []).append((n, veces))
+            propias = [nucleo.dato(nodo.get("_frontmatter", {}), clave) for clave in CLAVES_PREGUNTAS]
+            de_ficha = (de_claude.get(nodo["ruta"]) or {}).get("preguntas", [])
+            cuenta = contar(" ".join(propias + de_ficha)) if con_preguntas else {}
+            self.largos_pregunta.append(sum(cuenta.values()))
+            for termino, veces in cuenta.items():
+                self.preguntas.setdefault(termino, []).append((n, veces))
             desfase = nodo.get("_desfase", 0)
             for seccion in (p for entera in nucleo.seccionar(nodo["_cuerpo"]) for p in pasajes_de(entera)):
                 s = len(self.secciones)
@@ -616,7 +627,7 @@ class Indice:
                 nodo = cerebro.por_id[indice]
                 linea = nodo.get("_desfase", 0) + nodo["_cuerpo"].count("\n", 0, posicion) + 1
                 self.del_indice[(numero_de[indice], linea)] = numero_de[destino]
-        self.vocabulario = sorted(set(self.post) | set(self.fichas) | set(self.tarjetas))
+        self.vocabulario = sorted(set(self.post) | set(self.fichas) | set(self.tarjetas) | set(self.preguntas))
         self.por_inicial = {}
         self.por_base = {}
         for palabra in self.vocabulario:
@@ -627,6 +638,8 @@ class Indice:
         self.promedio_ficha = sum(self.largos_ficha) / max(1, len(self.largos_ficha))
         con_tarjeta = [x for x in self.largos_tarjeta if x]
         self.promedio_tarjeta = sum(con_tarjeta) / max(1, len(con_tarjeta))
+        con_pregunta = [x for x in self.largos_pregunta if x]
+        self.promedio_pregunta = sum(con_pregunta) / max(1, len(con_pregunta))
         self.rutas_codigo = rutas_de_codigo()
         self.nombres_codigo = None if self.rutas_codigo is None else sorted(self.rutas_codigo)
         self.segundos = time.perf_counter() - comienzo
@@ -679,7 +692,7 @@ class Indice:
                 tf[unidad] = tf.get(unidad, 0.0) + peso * veces
         return tf
 
-    def puntuar(self, consulta, permitidas=None, sugerencias=None, raras=None):
+    def puntuar(self, consulta, permitidas=None, sugerencias=None, raras=None, preguntas=False):
         palabras = terminos(consulta)[:MAXIMO_TERMINOS]
         expansiones = [self.expandir(p) for p in palabras]
         for i, palabra in enumerate(palabras):
@@ -705,8 +718,19 @@ class Indice:
         total_secciones = len(self.secciones)
         total_notas = len(self.notas)
         cubre_tarjeta = {}
+        por_pregunta = {}
+        cubre_pregunta = {}
         en_texto = set()
         for i, pesos in enumerate(expansiones):
+            en_preguntas = self.por_termino(self.preguntas, pesos) if preguntas else {}
+            if en_preguntas:
+                idf = idf_de(total_notas, len(en_preguntas))
+                for n, veces in en_preguntas.items():
+                    if permitidas is not None and n not in permitidas:
+                        continue
+                    por_pregunta[n] = por_pregunta.get(n, 0.0) + bm25(idf, veces, self.largos_pregunta[n],
+                                                                       self.promedio_pregunta)
+                    cubre_pregunta.setdefault(n, set()).add(i)
             tf = self.por_termino(self.post, pesos)
             en_tarjetas = self.por_termino(self.tarjetas, pesos)
             cuantas = len(tf) or len(en_tarjetas)
@@ -759,8 +783,13 @@ class Indice:
                 salida[n] = ((puntaje + PESO_VECINOS * sum(cercanos))
                              * (COBERTURA_MINIMA + (1 - COBERTURA_MINIMA) * cobertura) * self.notas[n]["pesoTipo"])
             return salida
-        sin_tarjeta = finales(texto, cubiertas, [r if i in en_texto else 0.0 for i, r in enumerate(rareza)])
+        valor = [r if i in en_texto else 0.0 for i, r in enumerate(rareza)]
+        sin_tarjeta = finales(texto, cubiertas, valor)
         final = {**sin_tarjeta, **finales(solo_tarjeta, cubre_tarjeta, rareza)}
+        if any(n in texto for n in por_pregunta):
+            sumado = {n: puntaje + PESO_PREGUNTAS * por_pregunta.get(n, 0.0) for n, puntaje in texto.items()}
+            cubre = {n: cubiertas.get(n, set()) | cubre_pregunta.get(n, set()) for n in texto}
+            final.update(finales(sumado, cubre, valor))
         return palabras, mapa, final, secciones_de, por_ficha, rareza, sin_tarjeta
 
     def decisiones_de(self, n, mapa, rareza):
@@ -1010,7 +1039,8 @@ class Indice:
                                      and len(self.notas_con(p)) >= max(NOTAS_COMUN, VECES_MAS_COMUN * cuantas)]
                         if parecidas:
                             raras[palabra] = cuantas
-                elif not any(p in self.post or p in self.fichas or p in self.tarjetas for p in self.expandir(palabra)):
+                elif not any(p in self.post or p in self.fichas or p in self.tarjetas or p in self.preguntas
+                             for p in self.expandir(palabra)):
                     parecidas = [p for p in difflib.get_close_matches(palabra, candidatas, SUGERENCIAS, PARECIDO_MINIMO)
                                  if distancia(palabra, p) <= DISTANCIA_ERRATA]
             if parecidas:
@@ -1098,7 +1128,8 @@ class Indice:
         comienzo = time.perf_counter()
         permitidas = self.permitidas(grupos)
         corregida, sugerencias, raras = self.corregir(tema)
-        palabras, mapa, final, secciones_de, _, rareza, sin_tarjeta = self.puntuar(tema, permitidas, sugerencias, raras)
+        palabras, mapa, final, secciones_de, _, rareza, sin_tarjeta = self.puntuar(tema, permitidas, sugerencias, raras,
+                                                                                   preguntas=True)
         if memoria is not None:
             aca = (getattr(memoria, "proyecto", None) or "").rstrip("/")
             lejos = separados(proyectos_conocidos()) if aca else None
@@ -1116,6 +1147,9 @@ class Indice:
         necesarias = cantidad if cantidad <= 2 else cantidad - 1
         candidatos = self.lineas_candidatas(final, secciones_de, mapa, rareza)
         juntas = min(necesarias, max((c[1] for c in candidatos), default=0))
+        sin_preguntas = {**final, **sin_tarjeta}
+        juntas_sin_preguntas = juntas if sin_preguntas == final else min(necesarias, max(
+            (c[1] for c in self.lineas_candidatas(sin_preguntas, secciones_de, mapa, rareza)), default=0))
         vara = {}
         if juntas < necesarias:
             for n, cuantas, *_ in candidatos:
@@ -1181,6 +1215,7 @@ class Indice:
             "conPasajes": con_pasajes,
             "casi": len(casi),
             "juntas": juntas,
+            "juntasSinPreguntas": juntas_sin_preguntas,
             "aproximado": juntas < necesarias,
             "grupos": [{"clave": clave, "nombre": nombre, "notas": por_tipo[clave]}
                        for clave, nombre, _ in TIPOS if por_tipo[clave]],

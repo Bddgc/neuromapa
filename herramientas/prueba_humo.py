@@ -919,6 +919,9 @@ def revisar_configuracion(t):
     probar("el modo de comparación viene apagado (0) y se prende con la parte de los pedidos que van sin lo aprendido",
            configuracion.armar({}, t)["comparar_aprendido"] == 0.0
            and configuracion.armar({"comparar_aprendido": 0.2}, t)["comparar_aprendido"] == 0.2)
+    probar("ordenar con las preguntas de las notas viene prendido y se apaga con false",
+           configuracion.armar({}, t)["ordenar_con_preguntas"] is True
+           and configuracion.armar({"ordenar_con_preguntas": False}, t)["ordenar_con_preguntas"] is False)
     roto = t / "config-roto.json"
     for texto, esperado in (('{"fuentes": [{"nombre": "sin id"}]}', "necesita un id"),
                             ('{"proyectos": [{"raiz": "x", "marca": "(roto"}]}',
@@ -928,6 +931,7 @@ def revisar_configuracion(t):
                             ('{"dormir_con_claude": {"tope_usd_por_dia": 0}}', "tope_usd_por_dia"),
                             ('{"dormir_con_claude": {"tope_usd_por_dia": 1, "modelo": "a b"}}', "modelo"),
                             ('{"comparar_aprendido": 0.9}', "comparar_aprendido"),
+                            ('{"ordenar_con_preguntas": "no"}', "ordenar_con_preguntas va true o false"),
                             ("{no es json", "no es un JSON válido")):
         roto.write_text(texto, encoding="utf-8")
         try:
@@ -1240,6 +1244,41 @@ def revisar_tope_indice(t):
     probar("con 250 líneas cortas sigue cortando en la 201", cortas[:2] == ("peligro", 201), cortas)
     probar("si se pasan los dos topes, manda el que corta primero (125 líneas de 200 bytes llenan justo los 25 KB)",
            con(250, 200)[:2] == ("peligro", 126), con(250, 200))
+
+    def indice_con(renglones, bytes_del_indice=3000):
+        nodo = {"id": "i", "tipo": "indice", "ruta": str(t / "MEMORY-largos.md"), "lineas": len(renglones) + 2,
+                "bytes": bytes_del_indice, "_cuerpo": "\n".join(renglones), "_desfase": 2}
+        falso = types.SimpleNamespace(nodos=[nodo], listados_por_indice={}, indice_roto=[], rotos=[], sin_indice=[],
+                                      por_enlace={}, por_id={"i": nodo})
+        return medico.regla_indice(falso)
+
+    def entrada(nota, letras):
+        principio = f"- [{nota}]({nota}.md) — "
+        return principio + "x" * (letras - len(principio))
+
+    varias = "- Historias (archivo): [1](a-historia-1.md) uno; [2](a-historia-2.md) " + "y" * 300
+    renglones = ["# Memoria", "", entrada("corta", 120), entrada("justa", medico.LARGO_RENGLON_INDICE),
+                 entrada("larga", 300), varias, "Un párrafo suelto, que no es una entrada: " + "z" * 300,
+                 entrada("enorme", 471), entrada("pasada", 221), entrada("cuarta", 250)]
+    holgado = indice_con(renglones)
+    de_largos = [(h["linea"], h["tono"], h["texto"][:40]) for h in holgado if h["regla"] == "ganchoLargo"]
+    arreglo = next(h["arreglo"] for h in holgado if h["regla"] == "ganchoLargo")
+    apretado = indice_con(renglones, 20000)[0]
+    probar("un renglón del índice de más de 220 letras que apunta a una sola nota queda «para revisar», con su línea y "
+           "cuántas letras tiene; no el que junta varias notas, ni un párrafo suelto, ni el que llega justo a 220",
+           de_largos == [(10, "revisar", "Este renglón del índice tiene 471 letras"),
+                         (7, "revisar", "Este renglón del índice tiene 300 letras"),
+                         (12, "revisar", "Este renglón del índice tiene 250 letras"),
+                         (11, "revisar", "Este renglón del índice tiene 221 letras")]
+           and "hasta unas 200 letras" in arreglo and holgado[0]["regla"] == "presupuestoIndice"
+           and holgado[0]["tono"] == "info" and "más largos" not in holgado[0]["arreglo"], (de_largos, arreglo))
+    probar("cuando el índice se acerca al tope, el aviso nombra los tres renglones más largos (hay cuatro), del más largo "
+           "al más corto", apretado["tono"] == "aviso"
+           and apretado["arreglo"].endswith("Los renglones más largos: el 10 (471 letras), el 7 (300 letras), el 12 (250 "
+                                            "letras)."), apretado)
+    probar("un índice sin renglones largos no suma nada", [h["regla"] for h in indice_con(renglones[:4], 20000)]
+           == ["presupuestoIndice"] and "más largos" not in indice_con(renglones[:4], 20000)[0]["arreglo"],
+           indice_con(renglones[:4], 20000))
 
 
 def revisar_medico(cerebro, con_git):
@@ -1770,6 +1809,81 @@ def revisar_fichas(cerebro, t):
         numero = next(n for n, x in enumerate(buscador.Indice(cerebro).notas) if x["ruta"] == nodo["ruta"])
         probar("una nota que ya coincide por su texto se ordena igual que sin ficha (sumarla desordenaba los pedidos "
                "reales)", numero in final and final[numero] == sin_ficha[numero], (propia, final.get(numero)))
+        pregunta = f"¿dónde quedó {propia}?"
+        fichas.guardar({"fichas": {nodo["ruta"]: {"huella": "x" * 16, "tema": "tema", "claves": ["otra"],
+                                                  "preguntas": [pregunta]}}, "gastado": 0}, fichas.ARCHIVO)
+        indice = buscador.Indice(cerebro)
+        _, _, ordenado, _, _, _, decide = indice.puntuar(propia, preguntas=True)
+        _, _, sin_ordenar, _, _, _, decide_sin = indice.puntuar(propia)
+        probar("las preguntas de la ficha suben en el orden a la nota que ya coincide por su texto; el puntaje con que la "
+               "pista decide si aparece no cambia (con las preguntas adentro, 4 pedidos ajenos de 86 recibían pista)",
+               ordenado[numero] > sin_ordenar[numero] == decide[numero] and decide == decide_sin
+               and set(ordenado) == set(sin_ordenar), (ordenado.get(numero), sin_ordenar.get(numero)))
+        en_sobre = next((x["puntaje"] for g in indice.sobre(propia, None)["grupos"] for x in g["notas"]
+                         if x["ruta"] == nodo["ruta"]), None)
+        en_buscar = next((x["puntaje"] for x in indice.buscar(propia, 500, None)["resultados"]
+                          if x["ruta"] == nodo["ruta"]), None)
+        probar("--sobre y la pista ordenan con las preguntas; --buscar sigue como estaba",
+               en_sobre == round(ordenado[numero], 2) > en_buscar == round(sin_ordenar[numero], 2), (en_sobre, en_buscar))
+        r = indice.sobre(propia, None)
+        probar("sin cambio de orden entre las notas que se miran, las palabras juntas para decidir son las mismas",
+               r["juntasSinPreguntas"] == r["juntas"], (r["juntasSinPreguntas"], r["juntas"]))
+        fichas.ARCHIVO.unlink(missing_ok=True)
+        for clave, encabezado in (("preguntas", {"preguntas": pregunta}), ("questions", {"metadata": {"questions": pregunta}})):
+            escrita = copy.copy(cerebro)
+            escrita.nodos = [dict(n, _frontmatter={**n.get("_frontmatter", {}), **encabezado}) if n is nodo else n
+                             for n in cerebro.nodos]
+            _, _, ordenado, _, _, _, decide = buscador.Indice(escrita).puntuar(propia, preguntas=True)
+            probar(f"una línea «{clave}:» en el encabezado de la nota ordena igual que las preguntas de una ficha (sin "
+                   "pagar nada: la escribe el chat al guardar)", ordenado[numero] > decide[numero], ordenado.get(numero))
+        escrita = copy.copy(cerebro)
+        escrita.nodos = [dict(n, _frontmatter={**n.get("_frontmatter", {}), "preguntas": "¿cómo anda el multipregunta?"})
+                         if n is nodo else n for n in cerebro.nodos]
+        solo_pregunta = buscador.Indice(escrita)
+        r = solo_pregunta.sobre("multipregunta", None)
+        probar("una palabra que solo está en las preguntas no trae la nota ni da relevancia (ordenan, no suman notas), y "
+               "el corrector no la cambia por otra parecida",
+               not r["leerPrimero"] and r["relevancia"] == 0 and solo_pregunta.corregir("multipregunta")[0] is None,
+               (r["leerPrimero"], r["relevancia"]))
+        apagado = nucleo.CONFIG.get("ordenar_con_preguntas", True)
+        nucleo.CONFIG["ordenar_con_preguntas"] = False
+        try:
+            escrita.nodos = [dict(n, _frontmatter={**n.get("_frontmatter", {}), "preguntas": pregunta}) if n is nodo else n
+                             for n in cerebro.nodos]
+            _, _, ordenado, _, _, _, decide = buscador.Indice(escrita).puntuar(propia, preguntas=True)
+        finally:
+            nucleo.CONFIG["ordenar_con_preguntas"] = apagado
+        probar("con «ordenar_con_preguntas» en false en el config.json, las preguntas no cuentan",
+               ordenado[numero] == decide[numero], (ordenado.get(numero), decide.get(numero)))
+        dos = copy.copy(cerebro)
+        dos.nodos = list(cerebro.nodos) + [
+            {"id": "prueba:junta", "ruta": "C:/m/junta.md", "titulo": "Apunte uno", "tipo": "project", "grupo": "memoria",
+             "_cuerpo": "El trompolino lleva fresquibilis nuevo.\n"},
+            {"id": "prueba:suelta", "ruta": "C:/m/suelta.md", "titulo": "Apunte dos", "tipo": "project", "grupo": "memoria",
+             "_cuerpo": "Apunte sobre el trompolino viejo.\n",
+             "_frontmatter": {"preguntas": "¿qué fresquibilis lleva el trompolino? ¿trompolino con fresquibilis? ¿y la "
+                                           "gargamela?"}}]
+        indice_dos = buscador.Indice(dos)
+        suelta = next(n for n, x in enumerate(indice_dos.notas) if x["id"] == "prueba:suelta")
+        _, _, entera, _, _, _, _ = indice_dos.puntuar("trompolino gargamela", preguntas=True)
+        _, _, cortada, _, _, _, _ = indice_dos.puntuar("trompolino gargamel", preguntas=True)
+        _, _, ajena, _, _, _, _ = indice_dos.puntuar("trompolino zurubio", preguntas=True)
+        probar("las palabras de las preguntas entran al vocabulario: cuentan aunque el pedido las escriba cortadas",
+               entera[suelta] > cortada[suelta] > ajena[suelta], (entera.get(suelta), cortada.get(suelta), ajena.get(suelta)))
+        revisar, peso = buscador.NOTAS_A_REVISAR, buscador.PESO_PREGUNTAS
+        buscador.NOTAS_A_REVISAR, buscador.PESO_PREGUNTAS = 1, 5.0
+        try:
+            r = indice_dos.sobre("trompolino fresquibilis", None)
+            buscador.PESO_PREGUNTAS = 1e-9
+            _, _, ordenado, _, _, _, decide = indice_dos.puntuar("trompolino fresquibilis", preguntas=True)
+        finally:
+            buscador.NOTAS_A_REVISAR, buscador.PESO_PREGUNTAS = revisar, peso
+        probar("si las preguntas ponen arriba una nota que no junta las palabras, la pista igual se decide con la que las "
+               "juntaba antes de ordenar",
+               (r["juntas"], r["juntasSinPreguntas"]) == (1, 2) and r["relevancia"] > 0, (r["juntas"], r["juntasSinPreguntas"]))
+        probar("una pregunta que nombra otra palabra del pedido cuenta como que la nota también la cubre (en el banco, sin "
+               "esto se encontraba una nota menos)",
+               ordenado[suelta] > 1.2 * decide[suelta], (ordenado.get(suelta), decide.get(suelta)))
     finally:
         ruta.unlink(missing_ok=True)
         fichas.ARCHIVO.unlink(missing_ok=True)
@@ -3632,6 +3746,10 @@ def revisar_servir(t):
            "de 1 o más), y no si es floja (antes nunca: 1 de cada 3 preguntas cortas se quedaba sin pista)",
            hook_servir.merece_pista({"leerPrimero": [1], "juntas": 2, "relevancia": 1.0}, 6)
            and not hook_servir.merece_pista({"leerPrimero": [1], "juntas": 2, "relevancia": 0.95}, 6))
+    probar("si las preguntas de las notas cambiaron el orden, la pista se decide con las palabras juntas de antes de "
+           "ordenar (así las preguntas no dan ni sacan pistas)",
+           hook_servir.merece_pista({"leerPrimero": [1], "juntas": 1, "juntasSinPreguntas": 3, "relevancia": 1.0}, 6)
+           and not hook_servir.merece_pista({"leerPrimero": [1], "juntas": 3, "juntasSinPreguntas": 1, "relevancia": 3}, 6))
     orden = hook_servir.contexto("arreglá la validación de la clave del login", str(t / "proyecto")) or ""
     probar("una orden corta sin «?» también recibe pista (antes hacían falta 5 palabras sin el signo)",
            "arreglo-login" in orden and hook_servir.terminos_suficientes("hacé el commit") == 0, orden[:200])

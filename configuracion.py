@@ -259,6 +259,13 @@ def aprender_de(datos):
     return valor
 
 
+def ordenar_con_preguntas_de(datos):
+    valor = datos.get("ordenar_con_preguntas", True)
+    if not isinstance(valor, bool):
+        raise ConfigInvalida("ordenar_con_preguntas va true o false")
+    return valor
+
+
 def armar(datos, base):
     if not isinstance(datos, dict):
         raise ConfigInvalida("la configuración tiene que ser un objeto JSON")
@@ -284,6 +291,7 @@ def armar(datos, base):
         "partir_sola": partir_sola_de(datos),
         "borrar_registros_dias": dias_de_registro(datos),
         "aprender": aprender_de(datos),
+        "ordenar_con_preguntas": ordenar_con_preguntas_de(datos),
         "comparar_aprendido": comparar_aprendido_de(datos),
         "sensibles": textos(datos.get("sensibles"), "sensibles", True),
     }
