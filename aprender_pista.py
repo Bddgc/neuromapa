@@ -7,7 +7,7 @@ from registro import numero
 
 from aprender_comun import (APOYO, ARCHIVO, A_MANO, COLA, FUERZA_CODIGO, FUERZA_MINIMA, MEDIA_RECIENTE, MINIMO_PROYECTO,
                             MOSTRADAS_MINIMAS, PARTES_CORTO, PARTE_PROYECTO, PESO_GENERAL, PESO_RECIENTE, PREMIO_PISTA,
-                            RECIENTE, TOQUES, VERSION, clave, en_vivo, es_de_codigo, es_nota, nombre, prendido,
+                            RECIENTE, TOQUES, VERSION, clave, en_vivo, es_de_codigo, es_nota, es_temporal, nombre, prendido,
                             proyecto_de, pruebas, raices, raiz_de, rutas_de, util)
 from aprender_memoria import Memoria
 
@@ -60,7 +60,8 @@ class Aprendido(Lazos):
         return self._delicados[c]
 
     def pares(self, apoyo=APOYO):
-        return [x for x in super().pares(apoyo) if not self.delicado(x[1]) and not self.delicado(x[2])]
+        return [x for x in super().pares(apoyo) if not self.delicado(x[1]) and not self.delicado(x[2])
+                and not es_temporal(x[1]) and not es_temporal(x[2])]
 
     @classmethod
     def de_memoria(cls, memoria):

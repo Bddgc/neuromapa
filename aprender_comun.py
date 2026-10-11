@@ -68,6 +68,7 @@ CAMPOS_DIA = ("pedidos", "toques", "pistas", "seguidas", "notas", "notas_ap", "s
 RE_SESION = registro.RE_SESION
 RE_WORKTREE = re.compile(r"[\\/]\.claude[\\/]worktrees[\\/][^\\/]+", re.I)
 RE_AJENO = re.compile(r"/(?:node_modules|\.git|__pycache__|\.next|\.venv|venv|site-packages)/")
+RE_TEMPORAL = re.compile(r"\.te?mp(?:[.\d]|$)|^~\$|\.sw[op]$|~$")
 RE_ROTADO = re.compile(r"^eventos-(\d{8}-\d{6}(?:-\d+)?)\.jsonl(\.gz)?\Z")
 TEMPORAL = consultas.clave(tempfile.gettempdir()).rstrip("/") + "/claude/"
 CHATS = consultas.clave(configuracion.carpeta_de_claude() / "projects").rstrip("/") + "/"
@@ -121,10 +122,14 @@ def nombre(c):
     return c.rsplit("/", 1)[-1]
 
 
+def es_temporal(c):
+    return bool(RE_TEMPORAL.search(nombre(c)))
+
+
 def util(c):
     if not c or "://" in c or c.endswith("/") or "." not in nombre(c) or es_sensible(c):
         return False
-    if c.startswith(TEMPORAL) or "/tool-results/" in c or RE_AJENO.search(c):
+    if c.startswith(TEMPORAL) or "/tool-results/" in c or RE_AJENO.search(c) or es_temporal(c):
         return False
     return not c.startswith(CHATS) or "/memory/" in c
 

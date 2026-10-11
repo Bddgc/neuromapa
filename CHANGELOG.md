@@ -3,6 +3,47 @@
 Las versiones siguen el número de `.claude-plugin/plugin.json` (`claude plugin list` lo muestra, y Claude lo ve con `neuromapa --version`). Cada versión que
 sale sube ese número; si no, la actualización puede no traer nada (ver [CONTRIBUTING.md](CONTRIBUTING.md)).
 
+## 0.1.4 — en prueba
+
+Para ordenar la memoria cuando crece:
+
+- `--partir NOTA` y `--renombrar NOTA NUEVO`: para la nota que ya no entra en una lectura y para cambiarle el nombre a
+  una sin dejar enlaces rotos. Muestran primero el plan y lo hacen recién con el código de ese plan (`--confirmar`);
+  antes copian las notas como estaban a `respaldos/` y comprueban que no se pierda un renglón.
+- `partir_sola` en el `config.json` (viene apagado): la pasada de cada día parte sola las memorias que están por
+  llenarse, con ese mismo cuidado, lo anota en `respaldos/partidas.log` y se lo avisa a Claude. `--por-partir` dice qué
+  haría y `--partir-llenas` lo hace en el momento. El médico avisa antes con la regla nueva «casi llena».
+- Las notas de archivo se reconocen también por su descripción («(archivo) …»), no solo por el título del índice, y
+  pesan apenas menos que las vigentes (0,95 en vez de 0,85), porque muchas guardan datos que siguen valiendo. El médico
+  deja «para revisar» la que parece de archivo y no lo dice.
+- Una memoria que el índice nombra en un renglón junto con otras («Historias: [1](…); [2](…)») toma el proyecto de su
+  sección. Antes quedaba sin proyecto y la pista la ofrecía en chats de otro.
+- [docs/obsidian.md](docs/obsidian.md): cómo abrir la memoria en Obsidian sin que los dos se pisen.
+
+Para ver qué hay y qué falta:
+
+- El mapa se puede pintar por proyecto: el botón «Grupos / Proyectos», la lista «Proyectos» y la ficha de cada nota.
+  Cada proyecto puede llevar `nombre` y `color` en el `config.json`.
+- `--pendientes`: junta lo que las memorias dicen que falta (probar, decidir, commit, hacer), con su nota, su renglón y
+  su fecha. Solo lee.
+- `--reglas` y `--regla NOTA`: proponen qué memorias convienen como regla por carpeta de Claude Code (`.claude/rules/`
+  con `paths:`), que se carga sola al tocar un archivo de esa carpeta. `--recetas` y `--receta NOTA:N` hacen lo mismo
+  con los tramos «Cómo se hace…», que pueden ser skills. Escriben recién con `--confirmar` y no pisan lo que no
+  escribieron. El registro anota cuándo Claude Code carga una de esas reglas (su ruta, nunca su texto), y `--reglas`
+  dice cuántas veces cargó cada una.
+
+Para saber qué cambió:
+
+- `--sobre "tema" --al 6/10` (y `--buscar`): responde con la memoria como estaba ese día, sacada del historial.
+- `--cambios NOTA`: qué dato de una nota cambió y cuándo: qué decía antes y qué pasó a decir, sin contar lo que solo se
+  mudó tal cual a otra nota. Sin nota, qué notas cambiaron en los últimos días.
+- `--sobre`, por la consola, avisa debajo de lo que manda a leer si el renglón citado cambió y qué decía antes.
+
+Arreglos:
+
+- El médico ya no toma por commits las huellas de archivos de una lista («SHA OK (motor `…`, lanzador `…`)»).
+- Lo aprendido del uso no guarda ni sugiere archivos temporales (`.tmp` o `.temp` en el nombre, `~$`, `.swp`).
+
 ## 0.1.3 — en prueba
 
 - En Mac y Linux, el médico no encontraba el archivo de una cita con carpeta (`app/models/cosa.py:564`) cuando ese

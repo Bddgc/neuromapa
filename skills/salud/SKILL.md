@@ -22,6 +22,9 @@ Qué hacer con lo que marca:
   git que el dato nuevo es el correcto.
 - **En archivos de un proyecto** (CLAUDE.md, documentación): arreglalo si lo rompiste en esta charla; si no, contale al
   usuario qué marca y preguntale antes de tocarlo.
+- **Una memoria que ya no entra en un Read:** `neuromapa --partir nota.md` lista sus piezas, y con `--mover 3-17` arma
+  el plan para pasar lo viejo a una nota de archivo sin perder un renglón (no cambia nada). Mostrale el plan al
+  usuario y corré el `--confirmar` que da ese plan solo con su OK.
 - Los «para revisar» son datos que pueden haber quedado viejos: no son urgentes. Si comprobás uno contra el código o
   git y la nota está bien como está, proponele al usuario callarlo con `neuromapa --descartar-aviso RUTA:LÍNEA
   --motivo "por qué"`; con su OK, corrélo (vuelve solo si ese renglón cambia, y `--descartados` los lista).

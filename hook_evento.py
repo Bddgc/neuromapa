@@ -511,9 +511,10 @@ EVENTOS = {
     "PreToolUse": "pre", "PostToolUse": "post", "PostToolUseFailure": "falla",
     "UserPromptSubmit": "usuario", "Stop": "fin",
     "SubagentStop": "sub-fin", "Notification": "espera", "PreCompact": "compacta",
-    "SessionStart": "inicio", "SessionEnd": "cierre",
+    "SessionStart": "inicio", "SessionEnd": "cierre", "InstructionsLoaded": "regla",
 }
 DE_HERRAMIENTA = ("pre", "post", "falla")
+CARGA_POR_CARPETA = "path_glob_match"
 
 
 def armar(datos):
@@ -622,6 +623,10 @@ def sumar_de_sesion(evento, fase, datos):
         motivo = str(datos.get("trigger") or datos.get("source") or datos.get("reason") or "")
         if motivo:
             evento["p"] = motivo if motivo in MOTIVOS else "otro"
+    elif fase == "regla":
+        ruta = ruta_de_archivo(datos.get("file_path"))
+        if ruta:
+            evento["f"] = corto(ruta, 300)
 
 
 def sumar_de_herramienta(evento, fase, herramienta, tipo, entrada, datos):
@@ -784,12 +789,19 @@ def escribir(linea, espera=None, llave=None):
             hooks_comun.fallo()
 
 
+def se_anota(datos):
+    nombre = datos.get("hook_event_name")
+    if not (datos.get("tool_name") or nombre in EVENTOS):
+        return False
+    if nombre == "UserPromptSubmit" and hooks_comun.del_sistema(str(datos.get("prompt") or "")):
+        return False
+    return nombre != "InstructionsLoaded" or datos.get("load_reason") == CARGA_POR_CARPETA
+
+
 def main():
     try:
         datos = hooks_comun.entrada()
-        if not (datos.get("tool_name") or datos.get("hook_event_name") in EVENTOS):
-            return
-        if datos.get("hook_event_name") == "UserPromptSubmit" and hooks_comun.del_sistema(str(datos.get("prompt") or "")):
+        if not se_anota(datos):
             return
         evento = armar(datos)
         escribir_evento(evento, ESPERA_DE_FONDO)

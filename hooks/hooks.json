@@ -40,6 +40,9 @@
     "PreCompact": [
       { "hooks": [ { "type": "command", "command": "/bin/sh \"${CLAUDE_PLUGIN_ROOT}/scripts/python.sh\" -I -S \"${CLAUDE_PLUGIN_ROOT}/hook_cerebro.py\" \\; . \"${CLAUDE_PLUGIN_ROOT}/scripts/python.cmd\" hook_cerebro.py", "timeout": 5, "async": true } ] }
     ],
+    "InstructionsLoaded": [
+      { "matcher": "path_glob_match", "hooks": [ { "type": "command", "command": "/bin/sh \"${CLAUDE_PLUGIN_ROOT}/scripts/python.sh\" -I -S \"${CLAUDE_PLUGIN_ROOT}/hook_cerebro.py\" \\; . \"${CLAUDE_PLUGIN_ROOT}/scripts/python.cmd\" hook_cerebro.py", "timeout": 5, "async": true } ] }
+    ],
     "SessionEnd": [
       { "hooks": [ { "type": "command", "command": "/bin/sh \"${CLAUDE_PLUGIN_ROOT}/scripts/python.sh\" -I -S \"${CLAUDE_PLUGIN_ROOT}/hook_cerebro.py\" \\; . \"${CLAUDE_PLUGIN_ROOT}/scripts/python.cmd\" hook_cerebro.py", "timeout": 5 } ] }
     ]

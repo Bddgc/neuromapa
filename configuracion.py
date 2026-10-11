@@ -13,6 +13,7 @@ DEMO = CARPETA / "demo" / "config.json"
 BORRAR_REGISTROS_DIAS = 90
 TOPE_DORMIR = 20
 TOPE_COMPARAR = 0.5
+PARTIR_SOLA = {"desde": 85, "hasta": 50, "dias_frescos": 3}
 LOBULOS = ("prefrontal", "frontal", "parietal", "occipital", "temporal", "cerebelo", "tronco")
 PODAR = ["node_modules", ".git", ".next", "dist", "bin", "obj", ".claude", "__pycache__", ".venv", "venv"]
 EXCLUIR_FRAGMENTOS = ["\\.claude\\worktrees", "node_modules", "\\.git\\", "\\.next\\", "\\dist\\", "\\bin\\", "\\obj\\",
@@ -131,7 +132,7 @@ def proyectos_de(datos, base):
         armado = {"raiz": raiz, "alias": alias, "marca": marca, "pistas": pistas,
                   "extensiones": textos(proyecto.get("extensiones"), f"{campo}.extensiones", True),
                   "codigo": codigo_de(proyecto.get("codigo"), f"{campo}.codigo", base)}
-        for clave in ("remite_a", "prefijo_carpeta"):
+        for clave in ("remite_a", "prefijo_carpeta", "nombre", "color"):
             if proyecto.get(clave) is not None:
                 if not isinstance(proyecto[clave], str) or not proyecto[clave]:
                     raise ConfigInvalida(f"{campo}.{clave} tiene que ser un texto")
@@ -235,6 +236,22 @@ def dias_de_registro(datos):
     return dias
 
 
+def partir_sola_de(datos):
+    valor = datos.get("partir_sola")
+    if valor is None or valor is False:
+        return None
+    opciones = dict(PARTIR_SOLA)
+    if valor is not True:
+        if not isinstance(valor, dict) or set(valor) - set(PARTIR_SOLA):
+            raise ConfigInvalida(f'partir_sola va true, false o un objeto con {", ".join(PARTIR_SOLA)}')
+        opciones.update(valor)
+    if any(isinstance(v, bool) or not isinstance(v, int) for v in opciones.values()) \
+            or not 10 <= opciones["hasta"] < opciones["desde"] <= 100 or opciones["dias_frescos"] < 0:
+        raise ConfigInvalida("en partir_sola, «desde» y «hasta» son porcentajes del tope de una lectura (hasta menor que "
+                             "desde, como 85 y 50) y «dias_frescos», cuántos días de entradas nuevas no se tocan")
+    return opciones
+
+
 def aprender_de(datos):
     valor = datos.get("aprender", True)
     if not isinstance(valor, bool):
@@ -264,6 +281,7 @@ def armar(datos, base):
         "handoffs": handoffs_de(datos),
         "freno": freno_de(datos),
         "dormir_con_claude": dormir_con_claude_de(datos),
+        "partir_sola": partir_sola_de(datos),
         "borrar_registros_dias": dias_de_registro(datos),
         "aprender": aprender_de(datos),
         "comparar_aprendido": comparar_aprendido_de(datos),

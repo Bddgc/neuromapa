@@ -102,6 +102,7 @@ RE_CERRADO_AJENO = re.compile(r"\b(?:el|al)\s+(\d+)\b[^.;:]{0,30}?\bqued[óo]\s+
 RE_NUMERO = re.compile(r"\d+")
 RE_ENCABEZADO = re.compile(r"^ {0,3}(#{1,4})[ \t]+(.+?)[ \t#]*$")
 RE_ARCHIVO = re.compile(r"\((?:archivo|archive|archived)\)", re.I)
+RE_ARCHIVO_DESCRIPCION = re.compile(r"\s*(?:(?i:\((?:archivo|archive|archived)\))|(?:ARCHIVO|ARCHIVE|ARCHIVED)\b)")
 TRAMO_ABIERTOS = 20
 
 
@@ -114,7 +115,8 @@ def es_changelog(ruta):
 
 
 def es_archivo(nodo):
-    return bool(RE_ARCHIVO.search(nodo.get("titulo") or ""))
+    return bool(RE_ARCHIVO.search(nodo.get("titulo") or "")
+                or RE_ARCHIVO_DESCRIPCION.match(nodo.get("descripcion") or ""))
 
 
 def es_historica(nodo):
@@ -1240,7 +1242,9 @@ class Cerebro:
                        **{k: f[k] for k in ("lobulo", "ancla") if k in f}) for f in FUENTES]
         orden_grupo = {f["id"]: i for i, f in enumerate(FUENTES)}
         nodos = sorted(self.nodos, key=lambda n: (orden_grupo[n["grupo"]], orden_natural(n["id"])))
-        nodos = [{k: v for k, v in n.items() if not k.startswith("_")} for n in nodos]
+        de_proyecto, grupos_de_proyecto = self.por_proyecto()
+        nodos = [dict({k: v for k, v in n.items() if not k.startswith("_")}, proyecto=de_proyecto.get(n["id"], ""))
+                 for n in nodos]
         return {
             "generado": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
             "usuario": CONFIG["usuario"],
@@ -1253,6 +1257,7 @@ class Cerebro:
             "handoffs": {"nombre": HANDOFFS["nombre"], "prefijo": HANDOFFS["prefijo"],
                          "lados": [{"id": x["id"], "nombre": x["nombre"]} for x in HANDOFFS["lados"]]} if HANDOFFS else None,
             "grupos": grupos,
+            "gruposDeProyecto": grupos_de_proyecto,
             "nodos": nodos,
             "aristas": aristas,
             "salud": {
@@ -1274,6 +1279,14 @@ class Cerebro:
             "aprendido": aprendido,
             "aprender": bool(CONFIG.get("aprender", True)),
         }
+
+    def por_proyecto(self):
+        try:
+            import buscador
+            return buscador.grupos_de_proyecto(self)
+        except Exception as error:
+            avisar(f"no pude agrupar las notas por proyecto ({detalle(error)})")
+            return {}, []
 
     def lo_aprendido(self):
         try:
@@ -1416,8 +1429,13 @@ def armar_parser(epilogo):
                       help="junta lo que dicen las notas de un tema, por tipo, y dice qué leer primero")
     parser.add_argument("--todo", action="store_true",
                         help="con --buscar o --sobre: suma los grupos que no están en el foco; "
-                             "con --mapa: también las funciones internas; con --salud: muestra todos los hallazgos")
+                             "con --mapa: también las funciones internas; con --salud: muestra todos los hallazgos; "
+                             "con --pendientes: muestra todos, no solo los primeros de cada clase; "
+                             "con --cambios: todos los cambios, no solo los últimos")
     parser.add_argument("--cuantos", type=int, default=8, help="con --buscar: cuántas notas mostrar")
+    parser.add_argument("--al", default="", metavar="FECHA",
+                        help="con --sobre o --buscar: responde con la memoria como estaba ese día, sacada del historial "
+                             '(2026-10-06, 6/10 o "6/10 18:30"; sin hora, hasta el final del día); no toca las notas')
     modo.add_argument("--parecidas", metavar="TEXTO_O_RUTA",
                       help="antes de crear una memoria: dice si ya hay una parecida (top 5 y palabras compartidas)")
     modo.add_argument("--entidad", metavar="NOMBRE",
@@ -1472,6 +1490,57 @@ def armar_parser(epilogo):
     modo.add_argument("--historial", nargs="?", const="", metavar="TEXTO",
                       help="los últimos cambios de la memoria, guardados con fecha al terminar cada respuesta; con un "
                            "texto, cuándo apareció o se borró y qué decía (nunca toca las notas)")
+    modo.add_argument("--cambios", nargs="?", const="", metavar="NOTA_O_DÍAS",
+                      help="qué dato de una nota cambió y cuándo, sacado del historial: qué decía antes y qué pasó a "
+                           "decir, sin contar lo que solo se mudó tal cual a otra nota; sin nota, qué notas cambiaron en "
+                           "los últimos 2 días (o los que digas); con --todo, todos los cambios")
+    modo.add_argument("--partir", metavar="NOTA",
+                      help="muestra las piezas de una nota larga (títulos e ítems, con su tamaño); con --mover, el plan "
+                           "para pasar las viejas a otra nota sin perder un renglón; recién con --confirmar lo hace, y "
+                           "deja una copia de cómo estaba todo")
+    parser.add_argument("--mover", default="", metavar="PIEZAS",
+                        help="con --partir: qué piezas se van, con los números de la lista (3-17, o 3,5,8-12)")
+    parser.add_argument("--destino", default="", metavar="NOTA",
+                        help="con --partir: a qué nota van (si ya existe, al final); sin esto, a una nueva «…-historia-N»")
+    parser.add_argument("--titulo", default="",
+                        help="con --partir: el título de la nota nueva, o el del tramo que se agrega a una que ya existe")
+    parser.add_argument("--descripcion", default="",
+                        help="con --partir: la description de la nota nueva (lo que Claude lee para decidir si la abre)")
+    parser.add_argument("--gancho", default="",
+                        help="con --partir: lo que dice de la nota nueva el renglón del índice (si no, el principio de la "
+                             "description)")
+    modo.add_argument("--por-partir", action="store_true",
+                      help="lista las memorias que están por pasar el tope de una lectura y qué pasaría a otra nota la "
+                           "pasada de cada día si «partir_sola» está prendido, y lo último que partió; no cambia nada")
+    modo.add_argument("--pendientes", nargs="?", const="", metavar="PROYECTO",
+                      help="junta lo que las memorias dicen que falta: sin probar, sin decidir, sin commit o por hacer, con "
+                           "su nota, su renglón y su fecha; sola muestra lo del proyecto de la carpeta donde estás, con un "
+                           "nombre de proyecto lo de ese, y con «todos» lo de todos; no cambia nada")
+    modo.add_argument("--reglas", nargs="?", const="", metavar="PROYECTO",
+                      help="propone qué memorias convienen como regla por carpeta (un archivo en .claude/rules/ que Claude "
+                           "Code carga solo al leer o editar un archivo de esa carpeta): sale de con qué archivos se leyó "
+                           "cada memoria y de las carpetas que nombra; sola muestra las del proyecto de la carpeta donde "
+                           "estás, con un nombre las de ese, y con «todos» las de todos; no cambia nada")
+    modo.add_argument("--regla", metavar="NOTA",
+                      help="muestra el texto de la regla por carpeta que saldría de esa memoria y dónde iría; recién con "
+                           "--confirmar la escribe en .claude/rules/ del proyecto")
+    modo.add_argument("--recetas", nargs="?", const="", metavar="PROYECTO",
+                      help="lista los tramos de las memorias que dicen cómo se hace algo, con pasos o comandos, y cuánto "
+                           "se lee cada nota: son los que conviene pasar a skill; sola muestra las del proyecto de la "
+                           "carpeta donde estás, con un nombre las de ese, y con «todos» las de todos; no cambia nada")
+    modo.add_argument("--receta", metavar="NOTA:N",
+                      help="muestra cómo quedaría esa receta como skill y dónde iría; recién con --confirmar la escribe "
+                           "en .claude/skills/ del proyecto (o en la carpeta personal si la nota no es de ninguno)")
+    modo.add_argument("--partir-llenas", action="store_true",
+                      help="con «partir_sola» prendido, parte ahora las memorias que están por pasar el tope de una "
+                           "lectura, como hace sola la pasada de cada día: deja copia, lo anota en el registro y avisa")
+    modo.add_argument("--renombrar", nargs=2, metavar=("NOTA", "NUEVO"),
+                      help="muestra el plan para cambiarle el nombre a una nota: su archivo, el name de su encabezado y "
+                           "cada enlace, nombre de archivo o mención que apunta a ella en la memoria y en el índice; "
+                           "recién con --confirmar lo hace, y deja una copia de cómo estaba todo")
+    parser.add_argument("--confirmar", default="", metavar="CÓDIGO",
+                        help="con --partir, --renombrar, --regla o --receta: hace el cambio; el código es el que muestra "
+                             "el plan, y deja de valer si alguna nota cambió")
     modo.add_argument("--fichas", nargs="?", const=1.0, type=float, metavar="USD",
                       help="arma con Claude una ficha por nota (de qué trata, otras formas de nombrarlo, preguntas que "
                            "responde) para que el buscador la encuentre con otras palabras; solo las nuevas o cambiadas, "
@@ -1526,12 +1595,43 @@ def correr_herramienta(argumentos):
     if argumentos.recuperar_aviso is not None:
         import medico
         return medico.main_recuperar_aviso(argumentos.recuperar_aviso)
+    if argumentos.partir is not None:
+        import ordenar
+        return ordenar.main_partir(argumentos.partir, argumentos.mover, argumentos.destino, argumentos.titulo,
+                                   argumentos.descripcion, argumentos.confirmar, argumentos.gancho)
+    if argumentos.por_partir:
+        import ordenar
+        return ordenar.main_por_partir()
+    if argumentos.partir_llenas:
+        import dormir
+        return dormir.main_partir_llenas()
+    if argumentos.pendientes is not None:
+        import pendientes
+        return pendientes.main(argumentos.pendientes, argumentos.todo)
+    if argumentos.reglas is not None:
+        import reglas
+        return reglas.main(argumentos.reglas)
+    if argumentos.regla is not None:
+        import reglas
+        return reglas.main_regla(argumentos.regla, argumentos.confirmar)
+    if argumentos.recetas is not None:
+        import recetas
+        return recetas.main(argumentos.recetas)
+    if argumentos.receta is not None:
+        import recetas
+        return recetas.main_receta(argumentos.receta, argumentos.confirmar)
+    if argumentos.renombrar is not None:
+        import ordenar
+        return ordenar.main_renombrar(argumentos.renombrar[0], argumentos.renombrar[1], argumentos.confirmar)
     if argumentos.fichas is not None:
         import fichas
         return fichas.main(argumentos.fichas)
     if argumentos.historial is not None:
         import historial
         return historial.main(argumentos.historial)
+    if argumentos.cambios is not None:
+        import vigencia
+        return vigencia.main(argumentos.cambios, argumentos.todo)
     if argumentos.charlas is not None:
         import charlas
         return charlas.main(argumentos.charlas, max(1, argumentos.cuantos))
@@ -1542,9 +1642,16 @@ def correr_herramienta(argumentos):
         import parecidas
         return parecidas.main(argumentos.parecidas)
     if argumentos.buscar is not None or argumentos.sobre is not None:
-        import buscador
         consulta = argumentos.sobre if argumentos.sobre is not None else argumentos.buscar
+        if argumentos.al:
+            import historial
+            return historial.main_al(consulta, argumentos.al, argumentos.sobre is not None, argumentos.todo,
+                                     max(1, argumentos.cuantos))
+        import buscador
         return buscador.main(consulta, argumentos.sobre is not None, argumentos.todo, max(1, argumentos.cuantos))
+    if argumentos.al:
+        print('Error: --al va con --sobre o con --buscar: --sobre "tema" --al 6/10.')
+        return 2
     return None
 
 

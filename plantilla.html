@@ -1155,6 +1155,13 @@ body.anonimo #bloque-salud, body.anonimo #bloque-aprendido, body.anonimo #result
         </div>
         <div id="filtro-grupos" class="filtros"></div>
       </section>
+      <section class="bloque" id="bloque-proyectos" hidden>
+        <div class="bloque-cabeza">
+          <h2>Proyectos</h2>
+          <div class="mini-acciones"><button type="button" data-todos="proyectos">todos</button><button type="button" data-ninguno="proyectos">ninguno</button></div>
+        </div>
+        <div id="filtro-proyectos" class="filtros"></div>
+      </section>
       <section class="bloque">
         <div class="bloque-cabeza">
           <h2>Tipos de nota</h2>
@@ -1210,8 +1217,9 @@ body.anonimo #bloque-salud, body.anonimo #bloque-aprendido, body.anonimo #result
           <option value="fecha">Más recientes</option>
         </select>
         <div class="segmentado" role="group" aria-label="Color de las notas" id="modo-color" hidden>
-          <button type="button" data-color="grupos" aria-pressed="true">Grupos</button>
-          <button type="button" data-color="uso" aria-pressed="false" title="Mapa de calor: cuánto se usó cada nota de verdad">Uso</button>
+          <button type="button" data-color="grupos" aria-pressed="true" title="Cada nota con el color de su grupo (de dónde sale)">Grupos</button>
+          <button type="button" data-color="proyectos" aria-pressed="false" title="Cada nota con el color del proyecto al que pertenece" hidden>Proyectos</button>
+          <button type="button" data-color="uso" aria-pressed="false" title="Mapa de calor: cuánto se usó cada nota de verdad" hidden>Uso</button>
         </div>
       </div>
       <div class="en-vivo" id="en-vivo" hidden>
@@ -1440,6 +1448,19 @@ body.anonimo #bloque-salud, body.anonimo #bloque-aprendido, body.anonimo #result
     agregarGrupo(String(g.id), String(g.nombre || g.id), g.color);
   });
 
+  const proyectos = [];
+  const proyectoPorId = new Map();
+  function agregarProyecto(id, nombre, color) {
+    const p = { id, nombre, color: colorValido(color) || PALETA[proyectos.length % PALETA.length], cantidad: 0 };
+    proyectos.push(p);
+    proyectoPorId.set(id, p);
+    return p;
+  }
+  (Array.isArray(DATOS.gruposDeProyecto) ? DATOS.gruposDeProyecto : []).forEach(p => {
+    if (!p || p.id == null || proyectoPorId.has(String(p.id))) return;
+    agregarProyecto(String(p.id), String(p.nombre || p.id), p.color);
+  });
+
   const nodos = [];
   const porId = new Map();
   DATOS.nodos.forEach(d => {
@@ -1449,6 +1470,7 @@ body.anonimo #bloque-salud, body.anonimo #bloque-aprendido, body.anonimo #result
       titulo: String(d.titulo || d.slug || nombreArchivo(d.ruta) || d.id),
       ruta: String(d.ruta || ''),
       grupo: String(d.grupo || 'sin-grupo'),
+      proyecto: String(d.proyecto || ''),
       tipo: String(d.tipo || 'doc'),
       slug: String(d.slug || ''),
       descripcion: String(d.descripcion || ''),
@@ -1473,11 +1495,21 @@ body.anonimo #bloque-salud, body.anonimo #bloque-aprendido, body.anonimo #result
     };
     n.archivo = nombreArchivo(n.ruta) || n.id;
     if (!grupoPorId.has(n.grupo)) agregarGrupo(n.grupo, n.grupo, null);
+    if (!proyectoPorId.has(n.proyecto)) agregarProyecto(n.proyecto, 'Sin proyecto', '#868E96');
     if (!TIPOS[n.tipo]) TIPOS[n.tipo] = { nombre: n.tipo, ayuda: '' };
     nodos.push(n);
     porId.set(n.id, n);
   });
-  nodos.forEach(n => { grupoPorId.get(n.grupo).cantidad++; });
+  nodos.forEach(n => { grupoPorId.get(n.grupo).cantidad++; proyectoPorId.get(n.proyecto).cantidad++; });
+  const hayProyectos = proyectos.filter(p => p.cantidad > 0).length > 1;
+  const proyectoDelGrupo = new Map();
+  grupos.forEach(g => {
+    const cuenta = new Map();
+    nodos.forEach(n => { if (n.grupo === g.id) cuenta.set(n.proyecto, (cuenta.get(n.proyecto) || 0) + 1); });
+    let mejor = null;
+    cuenta.forEach((c, id) => { if (!mejor || c > cuenta.get(mejor)) mejor = id; });
+    if (mejor !== null) proyectoDelGrupo.set(g.id, proyectoPorId.get(mejor));
+  });
 
   const aristas = [];
   let descartadas = 0;
@@ -1629,6 +1661,7 @@ body.anonimo #bloque-salud, body.anonimo #bloque-aprendido, body.anonimo #result
   const GRUPOS_MEDICO = {
     rutaVieja: 'Rutas que ya no existen',
     commitInexistente: 'Commits que no existen',
+    huellaProbable: 'Huellas que parecen commits',
     yaResuelto: 'Puede que ya esté resuelto',
     huerfanaReal: 'Huérfanas de verdad',
     noEntraEnRead: 'No entran en un Read',
@@ -1643,7 +1676,7 @@ body.anonimo #bloque-salud, body.anonimo #bloque-aprendido, body.anonimo #result
     alcance: 'Alcance',
     commits: 'Revisión de commits'
   };
-  const GRUPO_DE_REGLA = { frontmatter: 'ficha', descripcionFloja: 'ficha', ganchoFlojo: 'ficha', anclaCorrida: 'anclas', anclas: 'anclas', hecho: 'hechos', hechoHuerfano: 'hechos' };
+  const GRUPO_DE_REGLA = { frontmatter: 'ficha', descripcionFloja: 'ficha', ganchoFlojo: 'ficha', archivoSinMarca: 'ficha', casiLlena: 'noEntraEnRead', anclaCorrida: 'anclas', anclas: 'anclas', hecho: 'hechos', hechoHuerfano: 'hechos' };
   const REGLAS_YA_EN_SALUD = new Set(['sinIndice', 'indiceRoto', 'enlaceRoto']);
   const SOLO_DATO = new Set(['alcance', 'presupuestoIndice', 'commits']);
   const tonoMedico = t => TONOS_MEDICO.includes(t) ? t : 'info';
@@ -1706,6 +1739,8 @@ body.anonimo #bloque-salud, body.anonimo #bloque-aprendido, body.anonimo #result
 
   const estado = {
     gruposOn: new Set(grupos.map(g => g.id)),
+    proyectosOn: new Set(proyectos.map(p => p.id)),
+    porProyecto: false,
     tiposOn: new Set(Object.keys(TIPOS)),
     clasesOn: new Set(ORDEN_CLASES.filter(c => !CLASES[c].apagada)),
     terminos: [],
@@ -1742,7 +1777,7 @@ body.anonimo #bloque-salud, body.anonimo #bloque-aprendido, body.anonimo #result
 
   const vivo = { calor: false, uso: null, previo: null, tDisparo: 0, tapas: [], tapaPanel: null, alCerrar: null };
   const presenta = { cine: false, anonimo: false, pantalla: false };
-  const anonimos = { notas: null, grupos: null, chats: new Map() };
+  const anonimos = { notas: null, grupos: null, proyectos: null, chats: new Map() };
   const captura = { cuadro: 0, glEn: -1, pedidos: [], grabacion: null, ultimo: 0 };
   const compartir = { ocupado: false, vertical: false, dialogo: null, texto: null, foto: null, dia: null, sinNotas: null, grabar: null, formato: null, marca: null };
 
@@ -1765,6 +1800,10 @@ body.anonimo #bloque-salud, body.anonimo #bloque-aprendido, body.anonimo #result
         if (!anonimos.grupos) anonimos.grupos = new Map(grupos.map((g, i) => [g, 'Grupo ' + (i < 26 ? String.fromCharCode(65 + i) : i + 1)]));
         return anonimos.grupos.get(x) || 'un grupo';
       }
+      case 'proyecto': {
+        if (!anonimos.proyectos) anonimos.proyectos = new Map(proyectos.map((p, i) => [p, 'Proyecto ' + (i < 26 ? String.fromCharCode(65 + i) : i + 1)]));
+        return anonimos.proyectos.get(x) || 'un proyecto';
+      }
       case 'lobulo': return String(x.nombre).split(' · ')[0];
       case 'archivo': {
         const m = /\.([a-z0-9]{1,8})$/i.exec(nombreArchivo(x));
@@ -1781,8 +1820,24 @@ body.anonimo #bloque-salud, body.anonimo #bloque-aprendido, body.anonimo #result
     }
   }
 
-  const colorDe = n => vivo.calor ? (n._calor || '#6b7280') : grupoPorId.get(n.grupo).color;
+  const colorDe = n => vivo.calor ? (n._calor || '#6b7280') : estado.porProyecto ? proyectoPorId.get(n.proyecto).color : grupoPorId.get(n.grupo).color;
+  const colorDelGrupo = g => estado.porProyecto && proyectoDelGrupo.has(g.id) ? proyectoDelGrupo.get(g.id).color : g.color;
   const punto = n => '<span class="punto" style="--c:' + colorDe(n) + '"></span>';
+
+  function marcarColor() {
+    const actual = vivo.calor ? 'uso' : estado.porProyecto ? 'proyectos' : 'grupos';
+    $('#modo-color').querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.color === actual)));
+  }
+
+  function ponerVistaDeColor(modo) {
+    estado.porProyecto = modo === 'proyectos' && hayProyectos;
+    marcarColor();
+    if (!vivo.calor) try { localStorage.setItem('cerebro-color', estado.porProyecto ? 'proyectos' : 'grupos'); } catch (e) {}
+    tooltip._nodo = null;
+    if (estado.seleccionado) panel.style.setProperty('--c-panel', colorDe(estado.seleccionado));
+    if (estado.vista === 'lista') renderLista();
+    pedirDibujo();
+  }
 
   function aviso(texto) {
     const t = $('#toast');
@@ -1858,6 +1913,13 @@ body.anonimo #bloque-salud, body.anonimo #bloque-aprendido, body.anonimo #result
       '<button type="button" class="solo" data-solo-grupo="' + esc(g.id) + '" title="Mostrar solo este grupo" aria-label="Mostrar solo ' + esc(publico('grupo', g, g.nombre)) + '">solo</button>' +
       '<span class="cuenta">' + g.cantidad + '</span></div>').join('') || '<p class="vacio">No hay grupos.</p>';
 
+    $('#bloque-proyectos').hidden = !hayProyectos;
+    $('#filtro-proyectos').innerHTML = proyectos.filter(p => p.cantidad > 0).map(p =>
+      '<div class="filtro"><label title="' + esc(publico('proyecto', p, p.nombre)) + '"><input type="checkbox" data-proyecto="' + esc(p.id) + '" checked>' +
+      '<span class="punto" style="--c:' + p.color + '"></span><span class="filtro-nombre">' + esc(publico('proyecto', p, p.nombre)) + '</span></label>' +
+      '<button type="button" class="solo" data-solo-proyecto="' + esc(p.id) + '" title="Mostrar solo este proyecto" aria-label="Mostrar solo ' + esc(publico('proyecto', p, p.nombre)) + '">solo</button>' +
+      '<span class="cuenta">' + p.cantidad + '</span></div>').join('');
+
     const cuentaTipos = {};
     nodos.forEach(n => { cuentaTipos[n.tipo] = (cuentaTipos[n.tipo] || 0) + 1; });
     $('#filtro-tipos').innerHTML = Object.keys(TIPOS).filter(t => cuentaTipos[t]).map(t =>
@@ -1876,6 +1938,7 @@ body.anonimo #bloque-salud, body.anonimo #bloque-aprendido, body.anonimo #result
 
   function sincronizarCasillas() {
     lateral.querySelectorAll('input[data-grupo]').forEach(i => { i.checked = estado.gruposOn.has(i.dataset.grupo); });
+    lateral.querySelectorAll('input[data-proyecto]').forEach(i => { i.checked = estado.proyectosOn.has(i.dataset.proyecto); });
     lateral.querySelectorAll('input[data-tipo]').forEach(i => { i.checked = estado.tiposOn.has(i.dataset.tipo); });
     lateral.querySelectorAll('input[data-clase]').forEach(i => { i.checked = estado.clasesOn.has(i.dataset.clase); });
   }
@@ -2169,7 +2232,7 @@ body.anonimo #bloque-salud, body.anonimo #bloque-aprendido, body.anonimo #result
   }
 
   function baseVisible(n) {
-    return estado.gruposOn.has(n.grupo) && estado.tiposOn.has(n.tipo);
+    return estado.gruposOn.has(n.grupo) && estado.proyectosOn.has(n.proyecto) && estado.tiposOn.has(n.tipo);
   }
 
   function recalcularVisibles() {
@@ -2989,6 +3052,7 @@ body.anonimo #bloque-salud, body.anonimo #bloque-aprendido, body.anonimo #result
     }
     const avisos = [];
     if (!estado.gruposOn.has(n.grupo)) { const g = grupoPorId.get(n.grupo); estado.gruposOn.add(n.grupo); avisos.push('el grupo «' + publico('grupo', g, g.nombre) + '»'); }
+    if (!estado.proyectosOn.has(n.proyecto)) { const p = proyectoPorId.get(n.proyecto); estado.proyectosOn.add(n.proyecto); avisos.push('el proyecto «' + publico('proyecto', p, p.nombre) + '»'); }
     if (!estado.tiposOn.has(n.tipo)) { estado.tiposOn.add(n.tipo); avisos.push('el tipo «' + nombreTipo(n.tipo) + '»'); }
     sincronizarCasillas();
     aplicarFiltros();
@@ -3265,7 +3329,10 @@ body.anonimo #bloque-salud, body.anonimo #bloque-aprendido, body.anonimo #result
     panel.style.setProperty('--c-panel', colorDe(n));
     estado.seleccionado = n;
     const g = grupoPorId.get(n.grupo);
-    $('#panel-chips').innerHTML = '<span class="chip">' + punto(n) + esc(g.nombre) + '</span><span class="chip">' + muestraTipo(n.tipo) + esc(nombreTipo(n.tipo)) + '</span>';
+    const p = proyectoPorId.get(n.proyecto);
+    const chip = (color, nombre) => '<span class="chip"><span class="punto" style="--c:' + color + '"></span>' + esc(nombre) + '</span>';
+    $('#panel-chips').innerHTML = chip(vivo.calor ? colorDe(n) : g.color, g.nombre) + (hayProyectos ? chip(p.color, p.nombre) : '') +
+      '<span class="chip">' + muestraTipo(n.tipo) + esc(nombreTipo(n.tipo)) + '</span>';
     $('#panel-titulo').textContent = n.titulo;
     $('#panel-ruta').textContent = n.ruta || '(sin ruta)';
     const desc = $('#panel-desc');
@@ -6369,7 +6436,7 @@ body.anonimo #bloque-salud, body.anonimo #bloque-aprendido, body.anonimo #result
       ctx.fillText(cartel.texto, cartel.x, cartel.y);
       ctx.beginPath();
       ctx.arc(cartel.x - cartel.w / 2 - 8 * e, cartel.y + 7 * e, 3.5 * e, 0, TAU);
-      ctx.fillStyle = cartel.g.color;
+      ctx.fillStyle = colorDelGrupo(cartel.g);
       ctx.fill();
       if (cartel.alfa > 0.15) anim.cajasTexto.push([cartel.x - cartel.w / 2 - 14 * e, cartel.y - 2, cartel.x + cartel.w / 2 + 4, cartel.y + 17 * e, cartel.alfa]);
     }
@@ -6600,7 +6667,7 @@ body.anonimo #bloque-salud, body.anonimo #bloque-aprendido, body.anonimo #result
           const x = cx * k + t.x;
           const y = cy * k + t.y;
           if (x + R < 0 || x - R > ancho || y + R < 0 || y - R > alto) continue;
-          ctx.drawImage(sprite(grupoPorId.get(id).color, 'aura'), x - R, y - R, 2 * R, 2 * R);
+          ctx.drawImage(sprite(colorDelGrupo(grupoPorId.get(id)), 'aura'), x - R, y - R, 2 * R, 2 * R);
         }
       }
     }
@@ -6816,9 +6883,10 @@ body.anonimo #bloque-salud, body.anonimo #bloque-aprendido, body.anonimo #result
       tooltip._nodo = n;
       tooltip._uso = uso;
       const g = grupoPorId.get(n.grupo);
+      const p = proyectoPorId.get(n.proyecto);
       const desc = n.descripcion ? publico('texto', n, recortar(n.descripcion, 190)) : '';
       tooltip.innerHTML = '<div class="tt-titulo">' + punto(n) + '<b>' + esc(publico('nota', n, n.titulo)) + '</b></div>' +
-        '<div class="tt-sub">' + esc(publico('grupo', g, g.nombre)) + ' · ' + esc(nombreTipo(n.tipo)) + ' · ' + n.grado + (n.grado === 1 ? ' conexión' : ' conexiones') + '</div>' +
+        '<div class="tt-sub">' + esc(estado.porProyecto ? publico('proyecto', p, p.nombre) : publico('grupo', g, g.nombre)) + ' · ' + esc(nombreTipo(n.tipo)) + ' · ' + n.grado + (n.grado === 1 ? ' conexión' : ' conexiones') + '</div>' +
         (uso ? '<div class="tt-sub">' + esc(uso) + '</div>' : '') +
         (desc ? '<div class="tt-desc">' + esc(desc) + '</div>' : '');
     }
@@ -10026,6 +10094,8 @@ body.anonimo #bloque-salud, body.anonimo #bloque-aprendido, body.anonimo #result
       const t = ev.target;
       if (t.dataset.grupo !== undefined) {
         if (t.checked) estado.gruposOn.add(t.dataset.grupo); else estado.gruposOn.delete(t.dataset.grupo);
+      } else if (t.dataset.proyecto !== undefined) {
+        if (t.checked) estado.proyectosOn.add(t.dataset.proyecto); else estado.proyectosOn.delete(t.dataset.proyecto);
       } else if (t.dataset.tipo !== undefined) {
         if (t.checked) estado.tiposOn.add(t.dataset.tipo); else estado.tiposOn.delete(t.dataset.tipo);
       } else if (t.dataset.clase !== undefined) {
@@ -10039,7 +10109,7 @@ body.anonimo #bloque-salud, body.anonimo #bloque-aprendido, body.anonimo #result
     lateral.addEventListener('click', ev => {
       const b = ev.target.closest('button');
       if (!b || !lateral.contains(b)) return;
-      const conjuntos = { grupos: ['gruposOn', grupos.map(g => g.id)], tipos: ['tiposOn', Object.keys(TIPOS)], clases: ['clasesOn', ORDEN_CLASES] };
+      const conjuntos = { grupos: ['gruposOn', grupos.map(g => g.id)], proyectos: ['proyectosOn', proyectos.map(p => p.id)], tipos: ['tiposOn', Object.keys(TIPOS)], clases: ['clasesOn', ORDEN_CLASES] };
       if (b.dataset.todos || b.dataset.ninguno) {
         const c = conjuntos[b.dataset.todos || b.dataset.ninguno];
         estado[c[0]] = new Set(b.dataset.todos ? c[1] : []);
@@ -10047,6 +10117,11 @@ body.anonimo #bloque-salud, body.anonimo #bloque-aprendido, body.anonimo #result
         aplicarFiltros();
       } else if (b.dataset.soloGrupo !== undefined) {
         estado.gruposOn = new Set([b.dataset.soloGrupo]);
+        sincronizarCasillas();
+        aplicarFiltros();
+        encuadrarLuego();
+      } else if (b.dataset.soloProyecto !== undefined) {
+        estado.proyectosOn = new Set([b.dataset.soloProyecto]);
         sincronizarCasillas();
         aplicarFiltros();
         encuadrarLuego();
@@ -10362,6 +10437,21 @@ body.anonimo #bloque-salud, body.anonimo #bloque-aprendido, body.anonimo #result
   anim.ultimaActividad = performance.now();
   aplicarModo();
   conectarEventos();
+  if (hayProyectos) {
+    const modoColor = $('#modo-color');
+    modoColor.hidden = false;
+    modoColor.querySelector('[data-color="proyectos"]').hidden = false;
+    let colorGuardado = null;
+    try { colorGuardado = new URLSearchParams(location.search).get('color') || localStorage.getItem('cerebro-color'); } catch (e) {}
+    estado.porProyecto = colorGuardado === 'proyectos';
+    marcarColor();
+  }
+  $('#modo-color').addEventListener('click', ev => {
+    const b = ev.target.closest('button[data-color]');
+    if (!b) return;
+    if (vivo.ponerColor) vivo.ponerColor(b.dataset.color === 'uso');
+    if (b.dataset.color !== 'uso') ponerVistaDeColor(b.dataset.color);
+  });
   iniciarPresenta();
   iniciarCompartir();
   ajustarLienzo();
@@ -11313,8 +11403,8 @@ body.anonimo #bloque-salud, body.anonimo #bloque-aprendido, body.anonimo #result
 
     function ponerColor(uso) {
       vivo.calor = uso;
-      modoColor.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String((b.dataset.color === 'uso') === uso)));
-      try { localStorage.setItem('cerebro-color', uso ? 'uso' : 'grupos'); } catch (e) {}
+      marcarColor();
+      try { localStorage.setItem('cerebro-color', uso ? 'uso' : estado.porProyecto ? 'proyectos' : 'grupos'); } catch (e) {}
       if (uso) cargarUso();
       pintarUso();
       pedirDibujo();
@@ -13189,10 +13279,8 @@ body.anonimo #bloque-salud, body.anonimo #bloque-aprendido, body.anonimo #result
       setInterval(medirCaja, 3000);
     }
     modoColor.hidden = false;
-    modoColor.addEventListener('click', e => {
-      const b = e.target.closest('button[data-color]');
-      if (b) ponerColor(b.dataset.color === 'uso');
-    });
+    modoColor.querySelector('[data-color="uso"]').hidden = false;
+    vivo.ponerColor = ponerColor;
     recargar.addEventListener('click', () => location.reload());
 
     const probar = $('#en-vivo-probar');

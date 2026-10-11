@@ -278,6 +278,10 @@ def revisar_hook(t):
          {"hook_event_name": "PostToolUse", "tool_name": "mcp__otro__subir",
           "tool_input": {"file_path": f"https://ejemplo.invalid/subir?token={SECRETO}"}}),
         ("un motivo de compactación inventado", {"hook_event_name": "PreCompact", "trigger": f"{SECRETO} algo"}),
+        ("una regla por carpeta cargada", {"hook_event_name": "InstructionsLoaded", "load_reason": "path_glob_match",
+                                           "file_path": str(t / ".claude" / "rules" / "semillas.md"),
+                                           "globs": [f"datos/{SECRETO}/**"], "memory_type": f"Project {SECRETO}",
+                                           "trigger_file_path": str(t / "datos" / f"{SECRETO}.txt")}),
         ("un nombre de herramienta enorme", {"hook_event_name": "PostToolUse", "tool_name": f'mcp__otro__{"a" * 3000}'}),
         ("una consulta desde el plugin", {"hook_event_name": "PostToolUse", "tool_name": "Bash",
                                           "tool_input": {"command": f"neuromapa --sobre \"tema {SECRETO}\""},
@@ -349,6 +353,16 @@ def revisar_hook(t):
     probar("del mensaje del usuario guarda solo el largo",
            eventos["un mensaje del usuario"].get("n") == len(f"mi clave es {SECRETO}"), eventos["un mensaje del usuario"])
     probar("de la web guarda solo el dominio", eventos["una web"].get("p") == "example.com", eventos["una web"])
+    cargada = {k: v for k, v in eventos["una regla por carpeta cargada"].items() if k != "t"}
+    probar("de una regla por carpeta que Claude Code cargó guarda solo cuál es (ni su texto, ni el patrón, ni el archivo que "
+           "la disparó); las instrucciones que se cargan por otro motivo, como al empezar, no se anotan",
+           cargada == {"s": SESION[:8], "e": "regla", "h": "", "k": "regla", "c": "C:\\demo",
+                       "f": str(t / ".claude" / "rules" / "semillas.md")}
+           and hook_evento.se_anota({"hook_event_name": "InstructionsLoaded", "load_reason": "path_glob_match"})
+           and not hook_evento.se_anota({"hook_event_name": "InstructionsLoaded", "load_reason": "session_start"})
+           and not hook_evento.se_anota({"hook_event_name": "InstructionsLoaded"})
+           and hook_evento.se_anota({"tool_name": "Read"}) and hook_evento.se_anota({"hook_event_name": "Stop"})
+           and not hook_evento.se_anota({"hook_event_name": "Inventado"}), cargada)
     probar("de la edición guarda solo cuántas líneas", eventos["una edición"].get("m") == [2, 1], eventos["una edición"])
     fallido, fondo = eventos["un comando que falló"], eventos["un comando de fondo sin resultados"]
     probar("de un comando guarda su familia, cuánto tardó, con qué código salió, si fue de fondo y si no encontró nada "
@@ -752,6 +766,13 @@ def revisar_cerebro(datos):
     probar("junta las 8 notas inventadas, ni una más", nombres == esperadas, nombres)
     grupos = {g["id"]: g["cantidad"] for g in datos.get("grupos", [])}
     probar("6 en la memoria, 1 CLAUDE.md y 1 plan", grupos == {"memoria": 6, "instrucciones": 1, "cerebro-ideas": 1}, grupos)
+    de_proyecto = {g["id"]: g["cantidad"] for g in datos.get("gruposDeProyecto", [])}
+    sueltos = [n["id"] for n in datos.get("nodos", []) if n.get("proyecto") not in de_proyecto]
+    probar("la página también lleva las notas agrupadas por proyecto: cada nota tiene el suyo, las cuentas cierran y hay un "
+           "grupo para las que no son de ninguno",
+           len(de_proyecto) > 1 and not sueltos and sum(de_proyecto.values()) == len(datos.get("nodos", []))
+           and all(g.get("nombre") and re.fullmatch(r"#[0-9A-Fa-f]{6}", g.get("color") or "")
+                   for g in datos.get("gruposDeProyecto", [])), (de_proyecto, sueltos))
     por_id = {n["id"]: Path(n["ruta"]).name for n in datos.get("nodos", [])}
     aristas = {(por_id.get(a["de"]), por_id.get(a["a"]), a["clase"]) for a in datos.get("aristas", [])}
     indice = {a for de, a, clase in aristas if de == "MEMORY.md" and clase == "indice"}
@@ -1266,6 +1287,55 @@ def revisar_medico(cerebro, con_git):
            citados == ["de4dbe7", "ab12cd3"], citados)
     probar("una huella cortada con «…» se reconoce para las otras notas",
            medico.huellas_de("motor servido (md5 `4649a21d…`)") == {"4649a21d"}, medico.huellas_de("md5 `4649a21d…`"))
+    en_lista = medico.huellas_de("SHA OK (motor `0a1b2c3d`, lanzador `4e5f6a7b`,\n  y guardia `5a6b7c8d`)")
+    probar("en una lista de huellas («SHA OK (motor `…`, lanzador `…`)») cuentan todas, también si la lista sigue en el "
+           "renglón de abajo; una oración nueva, la palabra «commit» u otra cosa entre comillas invertidas la cortan",
+           en_lista == {"0a1b2c3d", "4e5f6a7b", "5a6b7c8d"}
+           and medico.huellas_de("md5 `ab12cd34ef`. Arreglado en `de4dbe7`") == {"ab12cd34ef"}
+           and medico.huellas_de("md5 `ab12cd34ef`, commit `de4dbe7`") == {"ab12cd34ef"}
+           and medico.huellas_de("md5 `ab12cd34ef` (`sha.txt`), y `de4dbe7`") == {"ab12cd34ef"}, en_lista)
+    exe = "- **Exe:** `C:/x/app.exe`, SHA-256\n  `2CCD4440FD5F…` (`sha256.txt` al lado). El de antes `938a4c6f` sigue ahí."
+    con_commit = "El md5 cambió; el commit del arreglo es `de4dbe7`"
+    otro_item = "- huella `ab12cd34ef` del exe\n- arreglo `de4dbe7`"
+    probar("un código suelto con una huella nombrada un poco antes, en el mismo párrafo o ítem, parece una huella; con "
+           "«commit» en el medio, en otro ítem o sin nada que hable de huellas, no",
+           medico.huella_cerca(exe, exe.index("`938a4c6f`"))
+           and not medico.huella_cerca(con_commit, con_commit.index("`de4dbe7`"))
+           and not medico.huella_cerca(otro_item, otro_item.index("`de4dbe7`"))
+           and not medico.huella_cerca("Se arregló en `de4dbe7`", 14))
+    if con_git:
+        base = next(n for n in cerebro.nodos if nombre.get(n["id"]) == "arreglo-login.md")
+        cuerpo = ("Bajó con SHA OK (motor `0a1b2c3d`, lanzador `4e5f6a7b`). El exe tiene la huella `99aa88bb…`. El de antes "
+                  "`77cc66dd` sigue guardado.\n\nSe arregló en `5d4c3b2a`.")
+        con_huellas = types.SimpleNamespace(nodos=[dict(base, _cuerpo=cuerpo)])
+        marcados = {(h["regla"], h["tono"], v) for h in medico.regla_commits(con_huellas)
+                    for v in ("0a1b2c3d", "4e5f6a7b", "77cc66dd", "5d4c3b2a") if v in h["texto"]}
+        probar("el médico no marca como commit las huellas de una lista; la que tiene una huella nombrada cerca queda «para "
+               "revisar» como huella probable, y un commit que no existe sigue siendo un aviso",
+               marcados == {("huellaProbable", "revisar", "77cc66dd"), ("commitInexistente", "aviso", "5d4c3b2a")}, marcados)
+    suelta = next(n for n in cerebro.nodos if nombre.get(n["id"]) == "suelta.md")
+    carpeta = Path(suelta["ruta"]).parent
+
+    def de_memoria(archivo, descripcion="Lo que se hizo con el login en la primera semana del proyecto"):
+        return dict(suelta, id=archivo, ruta=str(carpeta / archivo), titulo="Una nota", descripcion=descripcion)
+
+    indice_falso = {"id": "i", "tipo": "indice", "ruta": str(carpeta / "MEMORY.md"),
+                    "_cuerpo": "- Login, historias (archivo): [1](login-viejo.md) y [2](login-marcada.md)\n"
+                               "- [Vigente](vigente.md) — lo de antes quedó en el (archivo) de [otra](login-otra.md)\n"}
+    notas = [de_memoria("login-viejo.md"), de_memoria("login-marcada.md", "(archivo) Lo de antes del login"),
+             de_memoria("vigente.md"), de_memoria("login-otra.md"), de_memoria("login-historia-3.md"),
+             de_memoria("la-historia.md"), de_memoria("formato-del-archivo.md")]
+    falso = types.SimpleNamespace(nodos=[indice_falso] + notas, ganchos={}, por_id={n["id"]: n for n in notas},
+                                  fuente_de={n["id"]: {"memoria": True} for n in [indice_falso] + notas},
+                                  por_ruta={nucleo.normalizar(n["ruta"]): n["id"] for n in notas})
+    sin_marca = {h["nota"]: h for h in medico.regla_frontmatter(falso) if h["regla"] == "archivoSinMarca"}
+    probar("una memoria que parece de archivo y no lo dice queda «para revisar»: la que el índice lista en un renglón "
+           "«(archivo)» con varias notas y la que se llama «…-historia-3»; no la que ya lo dice, ni una vigente cuyo renglón "
+           "nombra un archivo, ni «la-historia» o «formato-del-archivo»",
+           set(sin_marca) == {"login-viejo.md", "login-historia-3.md"}
+           and all(h["tono"] == "revisar" for h in sin_marca.values())
+           and "MEMORY.md la lista" in sin_marca["login-viejo.md"]["texto"]
+           and "por cómo se llama" in sin_marca["login-historia-3.md"]["texto"], sorted(sin_marca))
     codigo = medico.Codigo()
 
     def datos_de(texto, ext):
@@ -1577,6 +1647,15 @@ def revisar_archivo_en_la_pista():
     probar("una sola regla de «histórico» para el médico y el buscador: fuente histórica, changelog o «(archivo)»",
            nucleo.es_historica(nodo) and nucleo.es_historica(dict(nodo, titulo="x", ruta="C:/m/changelog-2.md"))
            and not nucleo.es_historica(dict(nodo, titulo="Cómo guardar un archivo")))
+    sin_marca = dict(nodo, titulo="Crónica, parte 2")
+    probar("una nota de archivo se reconoce también por su descripción («(archivo) …» o «ARCHIVO …», como las partes "
+           "viejas de un changelog), pero no por nombrar un archivo",
+           nucleo.es_archivo(dict(sin_marca, descripcion="(archivo) Crónica del 3/10; lo vigente va en otra"))
+           and nucleo.es_archivo(dict(sin_marca, descripcion="ARCHIVO del changelog, WEB-002 a WEB-016"))
+           and nucleo.es_archivo(dict(sin_marca, descripcion="(Archived) old notes"))
+           and not nucleo.es_archivo(dict(sin_marca, descripcion="Archivo de configuración: qué carpetas leer"))
+           and not nucleo.es_archivo(dict(sin_marca, descripcion="Guarda cada cambio en el archivo (archivo) de abajo"))
+           and not nucleo.es_archivo(sin_marca))
 
 
 def revisar_pasajes(cerebro):
@@ -2046,6 +2125,28 @@ def revisar_pagina_abierta(t, datos, html):
     en_anonimo = [n for n in nombres if n in visible(anonima)]
     probar("en modo anónimo la página no muestra los nombres reales de los grupos (en el modo normal sí se ven)",
            bool(a_la_vista) and not en_anonimo, (a_la_vista, en_anonimo))
+    de_proyecto = [g.get("nombre") for g in datos.get("gruposDeProyecto", []) if g.get("nombre")]
+    por_proyecto = abrir_en_chrome(chrome, pagina, "?color=proyectos")
+
+    def puesto(dom):
+        return re.findall(r'<button[^>]*data-color="(\w+)"[^>]*aria-pressed="true"', dom)
+
+    def a_la_vista_en(dom):
+        m = re.search(r'id="filtro-proyectos"[^>]*>(.*?)</section>', dom, flags=re.S)
+        return m.group(1) if m else ""
+
+    import html as html_modulo
+
+    def rotulos(dom):
+        return [html_modulo.unescape(r) for r in re.findall(r'<span class="filtro-nombre">([^<]*)</span>', a_la_vista_en(dom))]
+
+    probar("la página lista los proyectos para prenderlos y apagarlos, arranca coloreada por grupos y con ?color=proyectos "
+           "por proyecto, sin errores; en modo anónimo los proyectos también salen con nombres genéricos",
+           len(de_proyecto) > 1 and all(n in a_la_vista_en(normal) for n in de_proyecto) and puesto(normal) == ["grupos"]
+           and puesto(por_proyecto) == ["proyectos"] and not re.findall(r'data-errores="([^"]*)"', por_proyecto)
+           and len(rotulos(anonima)) == len(de_proyecto) and all(re.fullmatch(r"Proyecto [A-Z]", r) for r in rotulos(anonima))
+           and sorted(rotulos(normal)) == sorted(de_proyecto),
+           (de_proyecto, puesto(normal), puesto(por_proyecto), rotulos(normal), rotulos(anonima)))
 
 
 def fstrings_nuevos(texto):
@@ -4129,12 +4230,1236 @@ def revisar_guardar(t):
             f.truncate(largo)
 
 
+def revisar_ordenar(t):
+    seccion("Ordenar una nota larga (--partir)")
+    ordenar = importlib.import_module("ordenar")
+    carpeta = t / "ordenar"
+    carpeta.mkdir()
+    datos = t / "ordenar-datos"
+
+    def escribir(ruta, texto):
+        ruta.write_text(texto, encoding="utf-8", newline="\n")
+
+    def salida_de(*argumentos):
+        texto = io.StringIO()
+        with contextlib.redirect_stdout(texto):
+            codigo = ordenar.main_partir(*argumentos)
+        return codigo, texto.getvalue()
+
+    def con_texto(ruta):
+        return [r for r in ruta.read_text(encoding="utf-8").split("\n") if r.strip()]
+
+    cuerpo = ("# Bitácora del vivero\n\nLo nuevo va arriba.\n\n## Octubre\n\n- **3/10, bomba:** se cambió el relé.\n"
+              "  Segunda línea del mismo ítem.\n\n  Párrafo adentro del ítem.\n- **2/10, sensor:** se calibró.\n\n"
+              "```\n# esto es código, no un título\n- esto tampoco es un ítem\n```\n\nCierre de octubre, fuera de la lista.\n\n"
+              "---\n\n## Septiembre\n\n- **28/9, riego:** arranca a las 06:15.\n- **27/9, luz:** se cambió el tubo.\n")
+    bitacora = carpeta / "bitacora.md"
+    indice = carpeta / "MEMORY.md"
+    escribir(bitacora, frontmatter("bitacora", "Registro de arreglos del vivero, una entrada por arreglo", "project") + cuerpo)
+    escribir(indice, "# Memoria\n\n- [Bitácora del vivero](bitacora.md) — registro de arreglos\n- [Otra](otra.md) — otra cosa\n")
+    original = bitacora.read_bytes()
+    piezas = ordenar.piezas_de(ordenar.renglones_de(original.decode("utf-8")))
+    clases = [p["clase"] for p in piezas]
+    probar("una nota se corta en piezas por títulos e ítems: el encabezado no es pieza, lo que sigue a un ítem con sangría "
+           "va con él, lo de adentro de un bloque de código no corta, y un párrafo suelto después de la lista es otra pieza",
+           clases == ["titulo", "titulo", "item", "item", "parrafo", "regla", "titulo", "item", "item"]
+           and "Párrafo adentro" in "".join(ordenar.renglones_de(original.decode("utf-8"))[piezas[2]["desde"]:piezas[2]["hasta"]])
+           and piezas[1]["fin_seccion"] == 6 and piezas[6]["fin_seccion"] == 9, clases)
+    lista = "\n".join(ordenar.lista_de(bitacora))
+    probar("la lista de piezas dice cuánto pesa la nota, si entra en un Read y qué piezas arman cada sección",
+           "Entra en un Read" in lista and "9 piezas" in lista and "(sección entera: 7-9)" in lista, lista)
+    plan, error = ordenar.planear(bitacora, "7-9", memoria=True, indice=indice)
+    probar("el plan no toca nada: las notas y el índice siguen iguales y la nota nueva no existe",
+           error is None and bitacora.read_bytes() == original and not (carpeta / "bitacora-historia-1.md").exists()
+           and "bitacora-historia-1" in plan["rastro"], error)
+    respaldo, dicho, error = ordenar.aplicar(plan, datos)
+    nueva = carpeta / "bitacora-historia-1.md"
+    cabeza, resto = nucleo.separar_frontmatter(nueva.read_text(encoding="utf-8")) if nueva.exists() else ({}, "")
+    antes = [r for r in original.decode("utf-8").split("\n") if r.strip()]
+    ahora = [r for r in con_texto(bitacora) if r != plan["rastro"]]
+    movido = [r for r in resto.split("Lo vigente está en [[bitacora]].", 1)[-1].split("\n") if r.strip()]
+    probar("al confirmar, lo viejo pasa a una nota nueva «…-historia-1» y no se pierde ni se repite un renglón: lo que "
+           "queda más lo que se fue es la nota de antes",
+           error is None and sorted(ahora + movido) == sorted(antes) and len(movido) == 3
+           and "- **28/9, riego:** arranca a las 06:15." in movido and plan["rastro"] in con_texto(bitacora),
+           (error, movido, [r for r in antes if r not in ahora + movido]))
+    probar("la nota nueva nace como memoria de archivo: mismo tipo, su name es el del archivo, la description empieza con "
+           "«(archivo)», el título lo dice y apunta a la vigente",
+           nucleo.dato(cabeza, "name") == "bitacora-historia-1" and nucleo.dato(cabeza, "type", True) == "project"
+           and nucleo.dato(cabeza, "description").startswith("(archivo) ")
+           and nucleo.es_archivo({"titulo": "", "descripcion": nucleo.dato(cabeza, "description")})
+           and resto.lstrip("\n").startswith("# Bitácora del vivero, historia 1 (archivo)\n\nLo vigente está en [[bitacora]]."),
+           (cabeza, resto[:120]))
+    armada = "".join(ordenar.cabeza_para(
+        ["---\n", "name: vieja\n", "description: >\n", "  texto largo\n", "  en dos renglones\n", "metadata:\n",
+         "  type: feedback\n", "  originSessionId: abc\n", "  modified: 2026-01-01\n", "---\n"], "nueva", 'Dice "hola"', "\n"))
+    probar("el encabezado de la nota nueva copia el tipo, cambia el name y la description (aunque la vieja ocupara varios "
+           "renglones o la nueva lleve comillas) y no arrastra la fecha ni la sesión de la otra nota",
+           armada == '---\nname: nueva\ndescription: "Dice \\"hola\\""\nmetadata:\n  type: feedback\n---\n'
+           and nucleo.dato(nucleo.separar_frontmatter(armada + "\nx\n")[0], "description") == 'Dice "hola"', armada)
+    renglones_indice = indice.read_text(encoding="utf-8").split("\n")
+    probar("el índice gana un renglón para la nota nueva justo debajo del de la vigente, con «(archivo)» en el título",
+           renglones_indice[3].startswith("- [Bitácora del vivero, historia 1 (archivo)](bitacora-historia-1.md) — ")
+           and renglones_indice[4].startswith("- [Otra]") and "índice" in dicho, renglones_indice)
+    copias = sorted(p.name for p in respaldo.iterdir()) if respaldo else []
+    probar("antes de cambiar nada guarda una copia de la nota y del índice como estaban",
+           copias == ["1-bitacora.md", "2-MEMORY.md"] and (respaldo / "1-bitacora.md").read_bytes() == original, copias)
+    plan2, _ = ordenar.planear(bitacora, "3-4", descripcion="Arreglos de octubre", memoria=True, indice=indice)
+    viejo = bitacora.read_bytes()
+    escribir(bitacora, viejo.decode("utf-8") + "\nUn renglón que agregó otro chat.\n")
+    otro, _ = ordenar.planear(bitacora, "3-4", descripcion="Arreglos de octubre", memoria=True, indice=indice)
+    _, _, error = ordenar.aplicar(plan2, datos)
+    probar("si la nota cambió después de armar el plan, el código de confirmación ya no es el mismo y el plan viejo no se "
+           "aplica: no crea la nota nueva ni toca la vigente",
+           otro["huella"] != plan2["huella"] and error and "cambió" in error
+           and not (carpeta / "bitacora-historia-2.md").exists() and b"otro chat" in bitacora.read_bytes(), error)
+    _, _, error = ordenar.aplicar(otro, datos)
+    segunda = carpeta / "bitacora-historia-2.md"
+    probar("mover ítems sueltos deja un ítem en su lugar que dice a dónde fueron (el renglón en blanco que los separaba de "
+           "lo que sigue no se va con ellos), y la description que se pasa queda con «(archivo)» adelante",
+           error is None and "- Lo que seguía acá (2 piezas) pasó a [[bitacora-historia-2]]." in con_texto(bitacora)
+           and "[[bitacora-historia-2]].\n\n```\n" in bitacora.read_text(encoding="utf-8")
+           and 'description: "(archivo) Arreglos de octubre"' in segunda.read_text(encoding="utf-8")
+           and "Párrafo adentro del ítem." in segunda.read_text(encoding="utf-8")
+           and "Párrafo adentro del ítem." not in bitacora.read_text(encoding="utf-8"), error)
+    juntas, dicho = ordenar.cambio_de_indice(
+        "- [Bitácora](bitacora.md) — vigente\n- Bitácora, historias (archivo): [1](bitacora-historia-1.md) septiembre; "
+        "[2](bitacora-historia-2.md) octubre\n", "bitacora.md", "bitacora-historia-3.md", "Bitácora, historia 3 (archivo)",
+        "noviembre", 3)
+    probar("si el índice ya junta las partes viejas en un renglón «(archivo)», la nueva se suma a ese renglón",
+           juntas is not None and juntas.split("\n")[1].endswith("octubre; [3](bitacora-historia-3.md) noviembre")
+           and juntas.count("\n") == 2, (juntas, dicho))
+    plano = carpeta / "plano.md"
+    acumulado = carpeta / "acumulado.md"
+    escribir(plano, "# Pendientes\n\n- uno\n- dos\n- tres\n- cuatro\n")
+    acumulado.write_bytes(b"\xef\xbb\xbf# Acumulado\r\n\r\nLo de antes.\r\n")
+    plan3, error = ordenar.planear(plano, "2,4", destino="acumulado", titulo="Agregado")
+    _, _, error = ordenar.aplicar(plan3, datos) if plan3 else (None, None, error)
+    junto = acumulado.read_bytes()
+    probar("pasar piezas salteadas a una nota que ya existe las agrega al final, en orden, bajo el título pedido, y respeta "
+           "el BOM y los finales de renglón de esa nota; en una nota común el rastro es un enlace de Markdown",
+           error is None and junto.startswith(b"\xef\xbb\xbf") and junto.count(b"\n") == junto.count(b"\r\n")
+           and junto.decode("utf-8").replace("\r\n", "\n").endswith("Lo de antes.\n\n## Agregado\n\n- uno\n\n- tres\n")
+           and plano.read_text(encoding="utf-8") == "# Pendientes\n\n- Lo que seguía acá (2 piezas) pasó a "
+           "[acumulado.md](acumulado.md).\n- dos\n- cuatro\n", (error, junto, plano.read_text(encoding="utf-8")))
+    intacto = plano.read_bytes()
+    plan4, _ = ordenar.planear(plano, "3")
+    real = ordenar.escribir_atomico
+
+    def falla_en_la_vigente(ruta, contenido):
+        if Path(ruta).name == "plano.md":
+            raise PermissionError("plano.md sigue tomado por otro programa")
+        return real(ruta, contenido)
+
+    ordenar.escribir_atomico = falla_en_la_vigente
+    try:
+        _, _, error = ordenar.aplicar(plan4, datos)
+    finally:
+        ordenar.escribir_atomico = real
+    probar("si falla a mitad de camino, deshace lo que alcanzó a escribir: la nota nueva no queda y la vigente sigue igual",
+           error and "como estaba" in error and not (carpeta / "plano-historia-1.md").exists()
+           and plano.read_bytes() == intacto, error)
+    plan5, _ = ordenar.planear(bitacora, "5", memoria=True, indice=indice)
+    vigente = bitacora.read_bytes()
+
+    def otro_chat_toca_el_indice(ruta, contenido):
+        real(ruta, contenido)
+        if Path(ruta).name == "bitacora.md":
+            with open(indice, "a", encoding="utf-8", newline="\n") as f:
+                f.write("- [Nueva](nueva.md) — la anotó otro chat\n")
+
+    ordenar.escribir_atomico = otro_chat_toca_el_indice
+    try:
+        _, _, error = ordenar.aplicar(plan5, datos)
+    finally:
+        ordenar.escribir_atomico = real
+    probar("si otro chat cambia el índice justo en el medio, no lo pisa: deshace las dos notas y el renglón del otro chat "
+           "queda",
+           error and "índice" in error and not (carpeta / "bitacora-historia-3.md").exists()
+           and bitacora.read_bytes() == vigente and "la anotó otro chat" in indice.read_text(encoding="utf-8")
+           and "historia-3" not in indice.read_text(encoding="utf-8"), error)
+    latin = carpeta / "latin.md"
+    latin.write_bytes("# Años\n\n- uno\n- dos\n".encode("latin-1"))
+    rechazos = [ordenar.planear(plano, "1-4")[1], ordenar.planear(plano, "9")[1], ordenar.planear(plano, "dos")[1],
+                ordenar.planear(carpeta / ".env.md", "1")[1], ordenar.planear(latin, "2")[1],
+                ordenar.planear(plano, "2", destino="plano.md")[1]]
+    probar("no se lleva la nota entera, ni piezas que no existen, ni toca un archivo con nombre de clave, uno que no está "
+           "en UTF-8 o un destino que es la misma nota",
+           all(rechazos) and "entera" in rechazos[0] and "no hay pieza" in rechazos[1] and "clave" in rechazos[3]
+           and "UTF-8" in rechazos[4] and "misma" in rechazos[5], rechazos)
+    codigo, texto = salida_de(str(plano))
+    probar("--partir con una nota sola lista las piezas y no cambia nada",
+           codigo == 0 and "4 piezas" in texto and "--mover" in texto and plano.read_bytes() == intacto, texto)
+    codigo, texto = salida_de(str(plano), "3", "", "", "", "")
+    clave = re.search(r"--confirmar ([0-9a-f]{8})", texto)
+    probar("con --mover muestra el plan (qué se va, a dónde, cómo queda cada nota) y el código para confirmarlo, todavía "
+           "sin cambiar nada",
+           codigo == 0 and clave and "todavía no cambié nada" in texto and "plano-historia-1.md, nueva" in texto
+           and plano.read_bytes() == intacto, texto)
+    codigo, texto = salida_de(str(plano), "3", "", "", "", "00000000")
+    probar("con un código de confirmación que no es el del plan no hace nada y lo dice",
+           codigo == 2 and "no es la de este plan" in texto and plano.read_bytes() == intacto, texto)
+    codigo, texto = salida_de(str(plano), "3", "", "", "", clave.group(1) if clave else "")
+    guardados = sorted((nucleo.DATOS / ordenar.RESPALDOS).glob("*-partir*/1-plano.md"))
+    probar("con el código del plan hace el cambio, deja la copia de antes en la carpeta de datos y sugiere correr el médico",
+           codigo == 0 and "Hecho" in texto and (carpeta / "plano-historia-1.md").exists()
+           and len(guardados) == 1 and guardados[0].read_bytes() == intacto and "--salud" in texto, texto)
+    contexto, error = ordenar.resolver("perfil-ana")
+    _, es_indice = ordenar.resolver(str(t / "memoria" / "MEMORY.md"))
+    probar("una memoria se puede pedir por su nombre: sabe que es memoria y cuál es su índice; el índice mismo no se parte",
+           error is None and contexto["memoria"] and os.path.samefile(contexto["indice"], t / "memoria" / "MEMORY.md")
+           and es_indice and "índice" in es_indice, (error, es_indice))
+
+
+def revisar_renombrar(t):
+    seccion("Cambiarle el nombre a una nota (--renombrar)")
+    ordenar = importlib.import_module("ordenar")
+    mundo = t / "renombrar"
+    memoria, docs = mundo / "memoria", mundo / "docs"
+    memoria.mkdir(parents=True)
+    docs.mkdir()
+    (mundo / "en-vivo").mkdir()
+
+    def escribir(ruta, texto):
+        ruta.write_text(texto, encoding="utf-8", newline="\n")
+
+    def leer(ruta):
+        return ruta.read_text(encoding="utf-8")
+
+    escribir(memoria / "MEMORY.md", "# Memoria\n\n- [Registro de riego](registro-riego.md) — una entrada por arreglo del riego\n"
+             "- [Bomba](bomba-nueva.md) — la bomba que se cambió en marzo\n"
+             "- [Registro de riego, historia 1 (archivo)](registro-riego-historia-1.md) — lo viejo del registro\n")
+    escribir(memoria / "registro-riego.md",
+             frontmatter("registro-riego", "Registro de los arreglos del riego del vivero, una entrada por arreglo", "project")
+             + "# Registro de riego\n\nLo viejo está en [[registro-riego-historia-1]]. Este registro (registro-riego) se llena "
+               "solo. La bomba, en [[bomba-nueva]].\n")
+    cuerpo_bomba = ("# Bomba\n\nVer [[{n}]] y [[{n}|el registro]], también [[{n}#Marzo]].\n"
+                    "El detalle está en [el registro]({n}.md#marzo) y en [otra forma](<./{n}.md>).\n"
+                    "Anotado en `{n}.md:12` y en {n} a secas.\n"
+                    "No tocar: registro-riego-historia-1, [[registro-riego-historia-1]], otro-registro-riego.md ni "
+                    "carpeta-ajena/registro-riego.md.\n")
+    cabeza_bomba = frontmatter("bomba-nueva", "La bomba nueva del vivero: cuándo se cambió y qué caudal da", "project")
+    escribir(memoria / "bomba-nueva.md", cabeza_bomba + cuerpo_bomba.replace("{n}", "registro-riego"))
+    escribir(memoria / "registro-riego-historia-1.md",
+             frontmatter("registro-riego-historia-1", "(archivo) Lo viejo del riego; lo vigente está en registro-riego", "project")
+             + "# Registro de riego, historia 1 (archivo)\n\nLo vigente está en [[registro-riego]].\n")
+    plan_docs = "# Plan del vivero\n\nLa memoria `registro-riego.md` tiene los arreglos; ver ../memoria/registro-riego.md.\n"
+    escribir(docs / "PLAN.md", plan_docs)
+    escribir(mundo / "config.json", json.dumps({"usuario": "Ana", "fuentes": [
+        {"id": "memoria", "nombre": "Memoria", "color": "#E64980", "raices": [[str(memoria), False, ""]], "memoria": True,
+         "foco": True},
+        {"id": "docs", "nombre": "Docs", "color": "#888888", "raices": [[str(docs), False, ""]], "foco": True}]},
+        ensure_ascii=False))
+    vieja, nueva = memoria / "registro-riego.md", memoria / "riego-registro.md"
+    escribir(mundo / "descartados.json", json.dumps({"descartados": [
+        {"regla": "yaResuelto", "ruta": str(vieja), "linea": 9, "huella": "0000000000000000", "motivo": str(vieja),
+         "fecha": "2026-01-01"}]}, ensure_ascii=False, indent=1))
+    escribir(mundo / "sugerencias.json", json.dumps([
+        {"de": str(vieja).replace("\\", "/"), "a": str(memoria / "bomba-nueva.md"), "clase": "sugerida",
+         "motivo": "van juntas"}], ensure_ascii=False, indent=1))
+
+    def grafo(nombre):
+        codigo, salida = cerebro_en(mundo, "--salida", str(mundo / f"{nombre}.html"), "--json", str(mundo / f"{nombre}.json"))
+        if codigo:
+            return codigo, salida
+        datos = json.loads(leer(mundo / f"{nombre}.json"))
+        de_quien = {n["id"]: Path(n["ruta"]).name.replace("riego-registro.md", "registro-riego.md") for n in datos["nodos"]}
+        return 0, sorted((a["clase"], de_quien[a["de"]], de_quien[a["a"]]) for a in datos["aristas"]
+                         if a["clase"] in ("wiki", "indice", "enlace", "mencion") and de_quien[a["de"]] != "PLAN.md")
+
+    antes = {p: p.read_bytes() for p in list(memoria.iterdir()) + [docs / "PLAN.md", mundo / "descartados.json",
+                                                                   mundo / "sugerencias.json"]}
+    _, grafo_antes = grafo("antes")
+    codigo, plan = cerebro_en(mundo, "--renombrar", "registro-riego", "riego-registro")
+    clave = re.search(r"--confirmar ([0-9a-f]{8})", plan)
+    probar("--renombrar muestra el plan sin tocar nada: cuántas referencias cambia y en qué notas, los datos propios que "
+           "nombran la nota y lo que queda afuera de la memoria, con su renglón",
+           codigo == 0 and clave and all(p.read_bytes() == b for p, b in antes.items()) and not nueva.exists()
+           and "todavía no cambié nada" in plan and "bomba-nueva.md (7)" in plan and "MEMORY.md (1)" in plan
+           and "descartados.json (1)" in plan and "sugerencias.json (1)" in plan
+           and "No toco 2 referencias fuera de la memoria" in plan and "PLAN.md:3" in plan, plan)
+    codigo, salida = cerebro_en(mundo, "--renombrar", "registro-riego", "riego-registro", "--confirmar", "00000000")
+    probar("con un código que no es el del plan no cambia nada",
+           codigo == 2 and all(p.read_bytes() == b for p, b in antes.items()) and not nueva.exists(), salida)
+    codigo, salida = cerebro_en(mundo, "--renombrar", "registro-riego", "riego-registro", "--confirmar",
+                                clave.group(1) if clave else "")
+    propia = leer(nueva) if nueva.exists() else ""
+    probar("con el código del plan el archivo cambia de nombre, su encabezado dice el nombre nuevo y lo que la nota dice de "
+           "sí misma también; sus enlaces a otras notas quedan como estaban",
+           codigo == 0 and "Hecho" in salida and not vieja.exists() and "\nname: riego-registro\n" in propia
+           and "Este registro (riego-registro) se llena solo" in propia and "[[registro-riego-historia-1]]" in propia, salida)
+    probar("en las otras memorias cambia cada forma de nombrarla ([[…]] con alias o sección, enlaces de Markdown con ancla "
+           "o entre < >, el nombre del archivo con su renglón y el nombre a secas) y nada más: ni la nota de historia, ni un "
+           "archivo que solo se le parece, ni uno igual que está en otra carpeta",
+           leer(memoria / "bomba-nueva.md") == cabeza_bomba + cuerpo_bomba.replace("{n}", "riego-registro"),
+           leer(memoria / "bomba-nueva.md"))
+    historia = leer(memoria / "registro-riego-historia-1.md")
+    probar("la nota de historia conserva su nombre y pasa a apuntar a la vigente con el nombre nuevo, también en su "
+           "description; el índice cambia solo el enlace de la nota",
+           "name: registro-riego-historia-1\n" in historia and "lo vigente está en riego-registro\n" in historia
+           and "Lo vigente está en [[riego-registro]]." in historia
+           and "- [Registro de riego](riego-registro.md) — una entrada" in leer(memoria / "MEMORY.md")
+           and "(registro-riego-historia-1.md) — lo viejo" in leer(memoria / "MEMORY.md"), historia)
+    descartes = json.loads(leer(mundo / "descartados.json"))["descartados"][0]
+    sugerida = json.loads(leer(mundo / "sugerencias.json"))[0]
+    probar("los datos propios que guardaban la ruta de la nota (avisos descartados, conexiones sugeridas) la siguen: cambia "
+           "solo ese campo, con las barras que tenía, y no un texto que la nombre",
+           descartes["ruta"] == str(nueva) and descartes["motivo"] == str(vieja)
+           and sugerida["de"] == str(nueva).replace("\\", "/") and sugerida["a"] == str(memoria / "bomba-nueva.md"),
+           (descartes, sugerida))
+    copias = sorted(p.name.split("-", 1)[1] for p in (mundo / "respaldos").glob("*-renombrar/*")) \
+        if (mundo / "respaldos").is_dir() else []
+    probar("lo de afuera de la memoria no se toca, y de todo lo que cambió queda una copia de antes",
+           (docs / "PLAN.md").read_bytes() == plan_docs.encode("utf-8")
+           and copias == sorted(["MEMORY.md", "registro-riego.md", "bomba-nueva.md", "registro-riego-historia-1.md",
+                                 "descartados.json", "sugerencias.json"]), copias)
+    codigo, grafo_despues = grafo("despues")
+    _, salud = cerebro_en(mundo, "--salud", "--todo")
+    probar("después del cambio el mapa une las memorias igual que antes (los mismos enlaces, uno por uno) y el médico no "
+           "encuentra ningún enlace roto en la memoria",
+           codigo == 0 and grafo_antes and grafo_despues == grafo_antes
+           and not [r for r in salud.splitlines() if str(memoria) in r.split(" — ")[0]
+                    and ("no lleva a ninguna nota" in r or "que no existe" in r)], (grafo_antes, grafo_despues, salud))
+    rechazos = [cerebro_en(mundo, "--renombrar", "riego-registro", nombre)[1]
+                for nombre in ("bomba-nueva", "sub/carpeta", "riego-registro", ".oculta")]
+    rechazos.append(cerebro_en(mundo, "--renombrar", str(memoria / "MEMORY.md"), "indice")[1])
+    probar("no acepta un nombre que ya usa otra nota, uno con carpeta, el mismo nombre, uno que empieza con punto, ni "
+           "cambiarle el nombre al índice",
+           "ya hay una nota" in rechazos[0] and "sin carpeta" in rechazos[1] and "ya se llama así" in rechazos[2]
+           and "sin carpeta" in rechazos[3] and "índice" in rechazos[4] and nueva.exists(), rechazos)
+    intacto = {p: p.read_bytes() for p in memoria.iterdir()}
+    tomado = correr(["-c", "import sys, os; sys.path.insert(0, sys.argv[1]); import ordenar, cerebro\n"
+                           "real = os.remove\n"
+                           "def falla(ruta):\n"
+                           "    if os.path.basename(str(ruta)) == 'riego-registro.md':\n"
+                           "        raise PermissionError('tomado por otro programa')\n"
+                           "    return real(ruta)\n"
+                           "contexto, error = ordenar.resolver('riego-registro')\n"
+                           "plan, error = ordenar.planear_nombre(contexto, 'otro-nombre', cerebro.DATOS)\n"
+                           "ordenar.os.remove = falla\n"
+                           "print(ordenar.aplicar_nombre(plan, cerebro.DATOS)[1])\n", str(CARPETA)],
+                    CEREBRO_CONFIG=str(mundo / "config.json"))
+    probar("si el archivo viejo no se puede borrar (otro programa lo tiene tomado), deshace todo: ninguna nota queda con "
+           "el nombre nuevo a medias",
+           "como estaba" in tomado.stdout and not (memoria / "otro-nombre.md").exists()
+           and all(p.read_bytes() == b for p, b in intacto.items()), tomado.stdout + tomado.stderr)
+    viejo_plan = correr(["-c", "import sys; sys.path.insert(0, sys.argv[1]); import ordenar, cerebro\n"
+                               "contexto, error = ordenar.resolver('riego-registro')\n"
+                               "plan, error = ordenar.planear_nombre(contexto, 'otro-nombre', cerebro.DATOS)\n"
+                               "open(sys.argv[2], 'a', encoding='utf-8', newline='\\n').write('Lo anotó otro chat.\\n')\n"
+                               "print(ordenar.aplicar_nombre(plan, cerebro.DATOS)[1])\n", str(CARPETA),
+                        str(memoria / "bomba-nueva.md")], CEREBRO_CONFIG=str(mundo / "config.json"))
+    probar("si otro chat cambia una de las notas entre el plan y el cambio, no aplica el plan viejo: nada cambia de nombre "
+           "y lo que escribió el otro chat queda",
+           "cambió" in viejo_plan.stdout and "como estaba" in viejo_plan.stdout and nueva.exists()
+           and not (memoria / "otro-nombre.md").exists() and leer(memoria / "bomba-nueva.md").endswith("Lo anotó otro chat.\n")
+           and "[[riego-registro]]" in leer(memoria / "bomba-nueva.md"), viejo_plan.stdout + viejo_plan.stderr)
+    def renombrar(viejo, nuevo_nombre):
+        _, texto = cerebro_en(mundo, "--renombrar", viejo, nuevo_nombre)
+        codigo_plan = re.search(r"--confirmar ([0-9a-f]{8})", texto)
+        return cerebro_en(mundo, "--renombrar", viejo, nuevo_nombre, "--confirmar", codigo_plan.group(1) if codigo_plan else "")
+
+    escribir(memoria / "vivero.md", frontmatter("vivero", "Datos fijos del vivero: dónde queda y cuánto mide", "project")
+             + "# Vivero\n\nEl vivero mide 40 metros.\n")
+    escribir(memoria / "medidas.md", frontmatter("medidas", "Las medidas del vivero y de cada cantero, en metros", "project")
+             + "# Medidas\n\nVer [[vivero]]. El vivero tiene dos naves.\n")
+    codigo, salida = renombrar("vivero", "invernadero")
+    probar("una nota de nombre corto, sin guion, también cambia su name y los [[enlaces]] que le apuntan; la palabra suelta "
+           "en el texto no se toca, porque el mapa tampoco la toma por una mención",
+           codigo == 0 and "\nname: invernadero\n" in leer(memoria / "invernadero.md")
+           and "El vivero mide 40 metros." in leer(memoria / "invernadero.md")
+           and leer(memoria / "medidas.md").endswith("Ver [[invernadero]]. El vivero tiene dos naves.\n")
+           and "medidas del vivero" in leer(memoria / "medidas.md"), salida)
+    escribir(docs / "Plan viejo.md", "# Plan viejo\n\nLo que se pensó en enero.\n")
+    escribir(docs / "INDICE.md", "# Documentos\n\n[el plan](Plan%20viejo.md#enero) y [otra forma](<Plan viejo.md>).\n")
+    codigo, salida = renombrar("Plan viejo", "Plan nuevo")
+    probar("una nota común con espacios en el nombre: cambian los enlaces de Markdown que le apuntan desde su mismo grupo, "
+           "con los espacios codificados o entre < > como estaban",
+           codigo == 0 and (docs / "Plan nuevo.md").exists() and not (docs / "Plan viejo.md").exists()
+           and leer(docs / "INDICE.md").endswith("[el plan](Plan%20nuevo.md#enero) y [otra forma](<Plan nuevo.md>).\n"),
+           salida + leer(docs / "INDICE.md"))
+    probar("el lugar del nombre dentro de un enlace se halla aunque lleve carpeta, ancla, < > o espacios codificados",
+           [ordenar.lugar_del_nombre(c) for c in ("nota.md", "../m/nota.md#x", "<./mi nota.md>", "a%20b.md?v=1")]
+           == [(0, 7), (5, 12), (3, 13), (0, 8)])
+
+
+def revisar_partir_sola(t):
+    seccion("Partir sola la memoria que está por llenarse (partir_sola)")
+    import datetime
+    ordenar = importlib.import_module("ordenar")
+    dormir = importlib.import_module("dormir")
+    hoy = datetime.date(2026, 10, 10)
+    fechas = [ordenar.fecha_de(texto, hoy) for texto in (
+        "2026-10-08 — el aro salía arriba", "Lo último del 6/10 (master)", "31/12, cierre del año", "Versión 0.8/10 lista",
+        "3/4/25: la bomba", "1/13 in US style", "30/2 no existe", "sin fecha")]
+    probar("lee la fecha del título de una entrada (2026-10-08, 6/10, 3/4/25): sin año toma el último que no cae en el "
+           "futuro, y no confunde un número de versión ni una fecha imposible",
+           fechas == [datetime.date(2026, 10, 8), datetime.date(2026, 10, 6), datetime.date(2025, 12, 31), None,
+                      datetime.date(2025, 4, 3), datetime.date(2026, 1, 13), None, None], fechas)
+
+    def nota_de(dias, relleno=900, titulo="## {f} — arreglo"):
+        partes = ["# Registro\n\nLo nuevo va arriba.\n\n"]
+        for d in dias:
+            f = (hoy - datetime.timedelta(days=d)).isoformat() if d is not None else "sin fecha"
+            partes.append(titulo.replace("{f}", f) + f" {d}\n\n- **Problema:** " + "x" * relleno + "\n- **Arreglo:** listo.\n\n")
+        return "".join(partes)
+
+    def eleccion(dias, objetivo=0.5, frescos=3):
+        texto = nota_de(dias)
+        piezas = ordenar.piezas_de(ordenar.renglones_de(texto))
+        elegida = ordenar.elegir_viejas(piezas, len(texto.encode()), len(texto.encode()) * objetivo, hoy, frescos)
+        if not elegida:
+            return None
+        return elegida["entradas"], (hoy - elegida["ultima"]).days, (hoy - elegida["primera"]).days
+    probar("de un registro con lo nuevo arriba elige las entradas más viejas, las de abajo, hasta dejar la nota en el "
+           "tamaño pedido; con lo nuevo abajo, las de arriba",
+           eleccion(list(range(20))) == (11, 9, 19) and eleccion(list(range(19, -1, -1))) == (11, 9, 19),
+           (eleccion(list(range(20))), eleccion(list(range(19, -1, -1)))))
+    probar("nunca se lleva las entradas de los últimos días ni deja menos de tres, aunque la nota siga grande",
+           eleccion(list(range(20)), objetivo=0.01, frescos=12) == (7, 13, 19)
+           and eleccion(list(range(20)), objetivo=0.01, frescos=0) == (17, 3, 19),
+           (eleccion(list(range(20)), 0.01, 12), eleccion(list(range(20)), 0.01, 0)))
+    probar("si no puede saber qué es lo viejo no elige nada: fechas desordenadas, todas del mismo día, menos de cuatro "
+           "entradas, o entradas sin fecha",
+           eleccion([5, 19, 2, 14, 9, 0, 17, 3, 11, 7]) is None and eleccion([8] * 10) is None
+           and eleccion([20, 10, 5]) is None and eleccion([None] * 10) is None)
+    mundo = t / "partir-sola"
+    memoria = mundo / "memoria"
+    memoria.mkdir(parents=True)
+    (mundo / "en-vivo").mkdir()
+    real = datetime.date.today()
+    cuerpo = "".join(f"## {(real - datetime.timedelta(days=d)).isoformat()} — arreglo {d}\n\n- **Problema:** "
+                     + "palabra " * 130 + "\n- **Arreglo:** listo.\n\n" for d in range(40))
+    registro = memoria / "registro.md"
+    registro.write_text(frontmatter("registro", "Registro de arreglos del vivero, una entrada por arreglo", "project")
+                        + "# Registro\n\nLo nuevo va arriba.\n\n" + cuerpo, encoding="utf-8", newline="\n")
+    de_archivo = memoria / "registro-viejo.md"
+    de_archivo.write_text(frontmatter("registro-viejo", "(archivo) Lo de antes del registro del vivero, entrada por entrada",
+                                      "project") + "# Registro viejo (archivo)\n\n" + cuerpo, encoding="utf-8", newline="\n")
+    archivo_antes = de_archivo.read_bytes()
+    (memoria / "MEMORY.md").write_text("# Memoria\n\n- [Registro](registro.md) — una entrada por arreglo\n"
+                                       "- [Registro viejo (archivo)](registro-viejo.md) — lo de antes\n", encoding="utf-8",
+                                       newline="\n")
+
+    def configurar(**mas):
+        (mundo / "config.json").write_text(json.dumps(dict({"usuario": "Ana", "fuentes": [
+            {"id": "memoria", "nombre": "Memoria", "color": "#E64980", "raices": [[str(memoria), False, ""]],
+             "memoria": True, "foco": True}]}, **mas), ensure_ascii=False), encoding="utf-8", newline="\n")
+
+    def renglones():
+        return sorted(r for p in memoria.glob("*.md") for r in p.read_text(encoding="utf-8").split("\n") if r.strip())
+
+    antes = registro.read_bytes()
+    todos = renglones()
+    viejo = time.time() - 3600
+    os.utime(registro, (viejo, viejo))
+    os.utime(de_archivo, (viejo, viejo))
+    configurar()
+    _, salud = cerebro_en(mundo, "--salud", "--todo")
+    codigo, salida = cerebro_en(mundo, "--dormir")
+    _, que_haria = cerebro_en(mundo, "--por-partir")
+    probar("apagado de fábrica: el médico avisa que la memoria está por llenarse, --por-partir dice qué entradas pasaría, "
+           "y la pasada de cada día no toca nada",
+           codigo == 0 and registro.read_bytes() == antes and len(list(memoria.glob("*.md"))) == 3
+           and "del tope de un Read" in salud and "La pasada de cada día" not in salud
+           and "pasarían a registro-historia-1.md" in que_haria and "Con «partir_sola» prendido" in que_haria
+           and "registro-viejo" not in que_haria,
+           (salida[-300:], que_haria))
+    configurar(partir_sola=True)
+    os.utime(registro, None)
+    codigo, salida = cerebro_en(mundo, "--dormir")
+    probar("prendido, no toca una memoria que se guardó hace menos de diez minutos (otro chat puede estar escribiéndola) y "
+           "dice por qué",
+           codigo == 0 and registro.read_bytes() == antes and "No partió sola registro.md" in salida
+           and "menos de 10 minutos" in salida, salida[-400:])
+    os.utime(registro, (viejo, viejo))
+    codigo, salida = cerebro_en(mundo, "--dormir")
+    historia = memoria / "registro-historia-1.md"
+    quedo = registro.read_text(encoding="utf-8")
+    se_fue = historia.read_text(encoding="utf-8") if historia.exists() else ""
+    agregados = [r for r in renglones() if r not in todos]
+    probar("prendido, la pasada de cada día pasa las entradas más viejas a una nota de historia: la memoria queda cerca de "
+           "la mitad del tope, las de los últimos días no se mueven y no se pierde ni un renglón",
+           codigo == 0 and "Partió sola registro.md" in salida and 20000 < len(quedo.encode()) < 26000
+           and all(f"arreglo {d}\n" in quedo for d in range(4)) and "arreglo 39\n" in se_fue and "arreglo 39\n" not in quedo
+           and not [r for r in todos if r not in renglones()] and len(agregados) < 12, (salida[-300:], len(quedo), agregados))
+    cabeza = nucleo.separar_frontmatter(se_fue)[0]
+    indice = (memoria / "MEMORY.md").read_text(encoding="utf-8")
+    probar("la nota de historia nace como archivo, con las fechas de lo que lleva en su description y en el renglón del "
+           "índice, y la vigente dice a dónde fue lo viejo",
+           nucleo.dato(cabeza, "description").startswith("(archivo) Registro: ") and " entradas viejas, del " in
+           nucleo.dato(cabeza, "description") and "](registro-historia-1.md) — del " in indice
+           and "pasó a [[registro-historia-1]]." in quedo, (cabeza, indice))
+    aviso = dormir.aviso_partidas(str(mundo), "chat0001")
+    probar("a cada chat le avisa una sola vez qué memoria partió, a qué nota fue lo viejo y que la relea antes de editarla",
+           aviso and "registro.md" in aviso and "registro-historia-1.md" in aviso and "releela" in aviso
+           and dormir.aviso_partidas(str(mundo), "chat0001") is None and dormir.aviso_partidas(str(mundo), "chat0002"),
+           aviso)
+    pedido = json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": "¿cómo quedó el registro de arreglos del vivero?",
+                         "cwd": str(mundo), "session_id": "chat0003-x"}).encode("utf-8")
+    del_hook = [correr_hook("hook_servir.py", pedido, CEREBRO_CONFIG=str(mundo / "config.json")).stdout for _ in range(2)]
+    probar("y el hook de cada pedido se lo pasa a Claude, también una sola vez por chat",
+           b"sola 1 memoria" in del_hook[0] and b"registro-historia-1.md" in del_hook[0] and b"releela" in del_hook[0]
+           and b"sola 1 memoria" not in del_hook[1], del_hook)
+    partida = registro.read_bytes()
+    codigo, salida = cerebro_en(mundo, "--dormir")
+    probar("la pasada siguiente no la vuelve a partir, porque ya está por debajo del tope; y una nota de archivo no se "
+           "parte nunca sola, por grande que sea",
+           codigo == 0 and registro.read_bytes() == partida and len(list(memoria.glob("*.md"))) == 4
+           and de_archivo.read_bytes() == archivo_antes, salida[-300:])
+    def crecer(desde_dia, cuantas):
+        texto = registro.read_text(encoding="utf-8")
+        mas = "".join(f"## {(real - datetime.timedelta(days=d)).isoformat()} — arreglo {d}\n\n- **Problema:** "
+                      + "palabra " * 130 + "\n- **Arreglo:** listo.\n\n" for d in range(desde_dia, desde_dia + cuantas))
+        rastro = texto.rindex("Lo que estaba acá")
+        registro.write_text(texto[:rastro] + mas + texto[rastro:], encoding="utf-8", newline="\n")
+        os.utime(registro, (viejo, viejo))
+
+    configurar(partir_sola={"desde": 85, "hasta": 60})
+    crecer(60, 18)
+    todos = renglones()
+    en_historia = se_fue.count("\n## ")
+    codigo, salida = cerebro_en(mundo, "--dormir")
+    junta = historia.read_text(encoding="utf-8")
+    cabeza = nucleo.separar_frontmatter(junta)[0]
+    cuantas = re.search(r": (\d+) entradas viejas, del ", nucleo.dato(cabeza, "description"))
+    dia_viejo = real - datetime.timedelta(days=77)
+    probar("cuando vuelve a llenarse, lo viejo se suma a la última nota de historia mientras tenga lugar, en vez de crear "
+           "otra: no nace una nota nueva ni un renglón más en el índice, y no se pierde ni un renglón",
+           codigo == 0 and "Partió sola registro.md" in salida and not (memoria / "registro-historia-2.md").exists()
+           and "arreglo 77\n" in junta and "arreglo 39\n" in junta and "\n## Entradas del " in junta
+           and not [r for r in todos if r not in renglones() and not r.startswith("description: ")
+                    and "](registro-historia-1.md)" not in r]
+           and (memoria / "MEMORY.md").read_text(encoding="utf-8").count("\n- ") == indice.count("\n- "), salida[-300:])
+    probar("la description de esa nota y su renglón del índice pasan a contar todas las entradas y las fechas de punta a "
+           "punta",
+           cuantas and int(cuantas.group(1)) > en_historia - 1
+           and f"del {dia_viejo.day}/{dia_viejo.month}/{dia_viejo.year} al " in nucleo.dato(cabeza, "description")
+           and f"](registro-historia-1.md) — del {dia_viejo.day}/{dia_viejo.month}/{dia_viejo.year} al "
+           in (memoria / "MEMORY.md").read_text(encoding="utf-8"), (cabeza, en_historia))
+    crecer(100, 20)
+    codigo, salida = cerebro_en(mundo, "--dormir")
+    probar("y cuando en la última ya no entra, abre una nota de historia nueva",
+           codigo == 0 and (memoria / "registro-historia-2.md").exists()
+           and "arreglo 119\n" in (memoria / "registro-historia-2.md").read_text(encoding="utf-8")
+           and historia.read_text(encoding="utf-8") == junta, salida[-300:])
+    segunda = memoria / "registro-historia-2.md"
+
+    def con_lugar(descripcion, peso):
+        nodo = {"id": "h2", "ruta": str(segunda), "titulo": "Registro, historia 2 (archivo)", "descripcion": descripcion}
+        falso = types.SimpleNamespace(por_id={"h2": nodo}, por_ruta={nucleo.normalizar(segunda): "h2"})
+        return ordenar.historia_con_lugar(falso, registro, peso)[0] is not None
+
+    sola = "(archivo) Registro: 20 entradas viejas, del 1/7/2026 al 20/7/2026; lo vigente está en registro"
+    probar("solo le agrega a una nota de historia que hizo ella misma y mientras entre: a una escrita a mano (con otra "
+           "description) no la toca, y si lo nuevo no entra tampoco",
+           con_lugar(sola, 1000) and not con_lugar("(archivo) Lo de julio, escrito a mano; lo vigente está en registro", 1000)
+           and not con_lugar(sola, 45000) and not con_lugar(sola.replace("1/7/2026", "41/7/2026"), 1000))
+    configurar(partir_sola={"desde": 40, "hasta": 90})
+    codigo, salida = cerebro_en(mundo, "--salud")
+    probar("un partir_sola mal escrito (hasta mayor que desde) se rechaza con un mensaje claro",
+           codigo != 0 and "partir_sola" in salida and "Traceback" not in salida, salida[-300:])
+
+
+def revisar_partir_siempre(t):
+    seccion("Partir sola aunque no se sepa qué es lo viejo (entradas de estos días y «parte 2»)")
+    import datetime
+    ordenar = importlib.import_module("ordenar")
+    dormir = importlib.import_module("dormir")
+    hoy = datetime.date(2026, 10, 10)
+
+    def viejas(dias, frescos):
+        texto = "# Registro\n\nLo nuevo va arriba.\n\n" + "".join(
+            f"## {(hoy - datetime.timedelta(days=d)).isoformat()} — arreglo {d}\n\n- **Problema:** " + "x" * 900
+            + "\n- **Arreglo:** listo.\n\n" for d in dias)
+        elegida = ordenar.elegir_viejas(ordenar.piezas_de(ordenar.renglones_de(texto)), len(texto.encode()), 1, hoy, frescos)
+        return elegida and (elegida["entradas"], (hoy - elegida["ultima"]).days, (hoy - elegida["primera"]).days)
+    probar("las entradas de estos días quedan protegidas; si no hay otra salida puede llevarse las más viejas de ellas, y "
+           "siempre deja las tres últimas",
+           viejas(list(range(8)), 30) is None and viejas(list(range(8)), None) == (5, 3, 7),
+           (viejas(list(range(8)), 30), viejas(list(range(8)), None)))
+
+    def relleno(cuanto):
+        return ("palabra " * 12 + "\n") * (cuanto // 97)
+
+    def corte(texto):
+        renglones = ordenar.renglones_de(texto)
+        elegido = ordenar.elegir_corte(renglones, ordenar.piezas_de(renglones), 25000, 40000, 2500)
+        if not elegido:
+            return None, 0
+        return ordenar.pelado(renglones[elegido["corte"]]), len("".join(renglones[:elegido["corte"]]).encode())
+
+    por_titulos = "# Guía\n\nPara qué sirve.\n\n" + "".join(f"## Tema {k}\n\n{relleno(3600)}\n" for k in range(12))
+    renglon, queda = corte(por_titulos)
+    probar("una nota sin fechas se corta en dos por un título, cerca de la mitad del tope de una lectura",
+           renglon and renglon.startswith("## Tema ") and 20000 < queda < 30000, (renglon, queda))
+    por_niveles = ("# Guía\n\n## A\n\n" + relleno(15000) + "\n## B\n\n" + relleno(300) + "\n### b1\n\n" + relleno(9500)
+                   + "\n### b2\n\n" + relleno(5000) + "\n### b3\n\n" + relleno(6000) + "\n## C\n\n" + relleno(9000))
+    renglon, queda = corte(por_niveles)
+    probar("entre un título de sección y un subtítulo que cae más cerca de la mitad, corta por el de sección (no parte una "
+           "sección si puede evitarlo)", renglon == "## B", (renglon, queda))
+    por_items = "# Lista\n\nPara qué sirve.\n\n## Todo\n\n" + "".join(
+        f"- ítem {k}: " + "palabra " * 90 + "\n" for k in range(60))
+    renglon, queda = corte(por_items)
+    probar("si no hay títulos por donde cortar, corta entre dos ítems",
+           renglon and renglon.startswith("- ítem ") and 22000 < queda < 28000, (renglon, queda))
+    por_parrafos = "".join("".join(f"Párrafo {k} renglón {j} " + "palabra " * 11 + "\n" for j in range(45)) + "\n"
+                           for k in range(9))
+    renglon, queda = corte(por_parrafos)
+    probar("y si tampoco hay ítems, entre dos párrafos separados por un renglón en blanco (nunca en medio de un párrafo)",
+           renglon and re.match(r"Párrafo \d renglón 0 ", renglon) and 20000 < queda < 30000, (renglon, queda))
+    renglon, queda = corte("".join(f"renglón {j} " + "palabra " * 12 + "\n" for j in range(400)))
+    probar("como último recurso, una nota que es un solo párrafo larguísimo se corta entre dos renglones, cerca de la mitad",
+           renglon and re.match(r"renglón \d+ ", renglon) and 20000 < queda < 30000, (renglon, queda))
+    con_cola = corte("".join(f"renglón {j} " + "palabra " * 12 + "\n" for j in range(400)) + "\n## Cola\n\n" + relleno(1500))
+    probar("no corta dentro de un bloque de código (ni como último recurso), y no saca una parte de migajas: si el único "
+           "título dejaría casi todo donde está, corta entre renglones",
+           corte("Introducción.\n\n```text\n" + por_parrafos + "```\n")[0] == "```text"
+           and corte("```text\n" + por_parrafos + "```\n")[0] is None
+           and re.match(r"renglón \d+ ", con_cola[0] or "") and 20000 < con_cola[1] < 30000,
+           (corte("Introducción.\n\n```text\n" + por_parrafos + "```\n"), corte("```text\n" + por_parrafos + "```\n"), con_cola))
+    renglon, queda = corte("Introducción.\n\n## Único\n\n- ítem grande: " + "palabra " * 5500 + "\n")
+    probar("no deja un título solo al final de la primera parte: el corte no cae justo debajo de un título",
+           renglon == "## Único", (renglon, queda))
+    carpeta = t / "tomos"
+    carpeta.mkdir()
+    guia = carpeta / "guia.md"
+    guia.write_text(frontmatter("guia", "Guía del vivero (VIGENTE): suelo, riego y poda", "project")
+                    + "# Guía\n\nPara qué sirve.\n\n## Suelo\n\n- Arena y turba.\n\n## Riego\n\nDos veces por semana.\n\n"
+                      "### Goteo\n\n- Media hora.\n- Con filtro.\n\n## Poda\n\nEn invierno.\n", encoding="utf-8", newline="\n")
+    indice = carpeta / "MEMORY.md"
+    indice.write_text("# Memoria\n\n- [Guía del vivero (VIGENTE)](guia.md) — suelo, riego y poda\n"
+                      "- Guía, historias (archivo): [1](guia-historia-1.md) 2025; [2](guia-historia-2.md) 2026\n"
+                      "- [Otra](otra.md) — otra cosa\n", encoding="utf-8", newline="\n")
+
+    def renglon_de(ruta, texto):
+        return next(i for i, r in enumerate(ordenar.renglones_de(ordenar.leer(ruta)[2])) if ordenar.pelado(r) == texto)
+
+    def con_texto(ruta):
+        return [r for r in ruta.read_text(encoding="utf-8").split("\n") if r.strip()]
+
+    original = con_texto(guia)
+    cuantos = len(ordenar.renglones_de(ordenar.leer(guia)[2]))
+    malos = [ordenar.planear(guia, "", memoria=True, corte=k)[0] for k in (
+        0, 3, renglon_de(guia, "# Guía"), renglon_de(guia, "## Riego") - 1, cuantos, cuantos + 5)]
+    probar("un corte que se llevaría la nota entera, que cae en el encabezado, en un renglón en blanco o fuera de la nota "
+           "se rechaza", malos == [None] * 6, malos)
+    plan, error = ordenar.planear(guia, "", memoria=True, indice=indice, titulo_nota="Guía del vivero (VIGENTE)",
+                                  corte=renglon_de(guia, "## Riego"))
+    falla = ordenar.aplicar(plan, str(carpeta))[2] if plan else error
+    parte = carpeta / "guia-parte-2.md"
+    quedo = guia.read_text(encoding="utf-8")
+    se_fue = parte.read_text(encoding="utf-8") if parte.exists() else ""
+    cabeza = nucleo.separar_frontmatter(se_fue)[0]
+    probar("la segunda mitad pasa a una nota «…-parte-2» que no es archivo: su description dice de qué nota sigue y qué "
+           "secciones lleva, y adentro dice que es la misma nota",
+           not falla and nucleo.dato(cabeza, "description") == "Parte 2 de «Guía del vivero» (sigue de guia): «Riego»; «Poda»"
+           and "# Guía del vivero, parte 2\n" in se_fue and "Sigue de [[guia]]. No es archivo" in se_fue
+           and "\n## Riego\n" in se_fue and "\n### Goteo\n" in se_fue and "\n## Poda\n" in se_fue, (falla, cabeza, se_fue[:300]))
+    probar("la primera parte termina diciendo dónde sigue y con qué secciones, y entre las dos no se pierde ni un renglón",
+           re.search(r"\n\nSigue en \[\[guia-parte-2\]\] \(5 piezas\): «Riego»; «Poda»\n$", quedo)
+           and "## Riego" not in quedo and "## Suelo" in quedo
+           and not [r for r in original if r not in con_texto(guia) + con_texto(parte)], quedo[-200:])
+    listado = indice.read_text(encoding="utf-8").split("\n")
+    probar("el índice gana un renglón para la parte 2, debajo de los de esa nota y sin mezclarla con sus historias de archivo",
+           listado[4] == "- [Guía del vivero, parte 2](guia-parte-2.md) — sigue de guia: «Riego» y lo que sigue"
+           and listado[3].endswith("[2](guia-historia-2.md) 2026") and listado[5].startswith("- [Otra]"), listado)
+    plan, error = ordenar.planear(parte, "", memoria=True, indice=indice, titulo_nota="Guía del vivero, parte 2",
+                                  corte=renglon_de(parte, "### Goteo"))
+    falla = ordenar.aplicar(plan, str(carpeta))[2] if plan else error
+    tercera = carpeta / "guia-parte-3.md"
+    se_fue = tercera.read_text(encoding="utf-8") if tercera.exists() else ""
+    listado = indice.read_text(encoding="utf-8").split("\n")
+    probar("si una parte vuelve a llenarse, lo que sale va a «…-parte-3» (no a «…-parte-2-parte-2»), que dice de qué "
+           "sección viene lo primero, y su renglón del índice queda debajo del de la parte 2",
+           not falla and "# Guía del vivero, parte 3\n" in se_fue
+           and "Sigue de [[guia-parte-2]]; lo primero es de la sección «Riego»." in se_fue
+           and listado[5].startswith("- [Guía del vivero, parte 3](guia-parte-3.md) — sigue de guia-parte-2: «Goteo»")
+           and listado[6].startswith("- [Otra]")
+           and not [r for r in original if r not in con_texto(guia) + con_texto(parte) + con_texto(tercera)],
+           (falla, se_fue[:300], listado))
+    cruzado = ("# Memoria\n\n- [Lanzador](lanzador.md) — la 0.8 se cuenta en [guia](guia.md)\n"
+               "- [Guía](guia.md) — suelo, riego y poda\n- [Otra](otra.md) — otra cosa\n")
+    con_renglon = (ordenar.cambio_de_indice(cruzado, "guia.md", "guia-historia-1.md", "Guía, historia 1 (archivo)",
+                                            "del 1/7/2026 al 5/7/2026", 1)[0] or "").split("\n")
+    solo_nombrada = (ordenar.cambio_de_indice(cruzado.replace("- [Guía](guia.md) — suelo, riego y poda\n", ""), "guia.md",
+                                              "guia-historia-1.md", "Guía, historia 1 (archivo)", "del 1/7/2026 al 5/7/2026",
+                                              1)[0] or "").split("\n")
+    probar("el renglón nuevo del índice va debajo del renglón propio de la nota, no debajo de otro que solo la nombra "
+           "(así el de una historia cayó en otra sección); si ninguno es el propio, debajo del que la nombra",
+           con_renglon[3:5] == ["- [Guía](guia.md) — suelo, riego y poda",
+                                "- [Guía, historia 1 (archivo)](guia-historia-1.md) — del 1/7/2026 al 5/7/2026"]
+           and solo_nombrada[3:4] == ["- [Guía, historia 1 (archivo)](guia-historia-1.md) — del 1/7/2026 al 5/7/2026"],
+           (con_renglon, solo_nombrada))
+    pegada = carpeta / "pegada.md"
+    pegada.write_text("# Notas\n\nPrimera línea.\nÚltima línea.\n## Final\n\nLo del final.\n", encoding="utf-8", newline="\n")
+    lista = carpeta / "lista.md"
+    lista.write_text("# Lista\n\n- Uno.\n- Dos.\n- Tres.\n", encoding="utf-8", newline="\n")
+    sin_blanco = ordenar.planear(pegada, "", memoria=True, corte=renglon_de(pegada, "## Final"))[0]
+    entre_items = ordenar.planear(lista, "", memoria=True, corte=renglon_de(lista, "- Tres."))[0]
+    probar("el aviso de dónde sigue queda como párrafo aparte aunque el título cortado viniera pegado al texto, y como "
+           "ítem cuando el corte cae entre dos ítems",
+           sin_blanco and sin_blanco["bytes_fuente"].decode("utf-8").endswith(
+               "Última línea.\n\nSigue en [[pegada-parte-2]] (1 pieza): «Final»\n")
+           and entre_items and entre_items["bytes_fuente"].decode("utf-8").endswith(
+               "- Dos.\n- Sigue en [[lista-parte-2]] (1 pieza): «Tres.»\n"),
+           (sin_blanco and sin_blanco["bytes_fuente"][-120:], entre_items and entre_items["bytes_fuente"][-120:]))
+    justa = carpeta / "justa.md"
+    justa.write_text("".join(f"renglón {j} " + "palabra " * 12 + "\n" for j in range(400)) + "\nCierre: "
+                     + "palabra " * 400 + "\n", encoding="utf-8", newline="\n")
+    falso = types.SimpleNamespace(carpeta_de={"j": str(carpeta)}, nodos=[], por_id={}, por_ruta={})
+    plan, dicho, error = ordenar.plan_sola(falso, {"id": "j", "ruta": str(justa), "titulo": "Justa"},
+                                           justa.stat().st_size / 50000, {"desde": 85, "hasta": 50, "dias_frescos": 3}, hoy)
+    probar("si ningún corte alcanza a dejarla holgada, igual hace el que más alivia en vez de no hacer nada",
+           plan and dicho.get("tomo") and dicho["primero"].startswith("Cierre: ")
+           and len(plan["bytes_fuente"]) > 40000, (dicho, error))
+    mundo = t / "partir-siempre"
+    memoria = mundo / "memoria"
+    memoria.mkdir(parents=True)
+    (mundo / "en-vivo").mkdir()
+    real = datetime.date.today()
+
+    def paso(dias, k):
+        return (f"## {(real - datetime.timedelta(days=dias)).isoformat()} — paso {dias}.{k}\n\n- **Qué:** "
+                + "palabra " * 450 + "\n- **Listo.**\n\n")
+
+    frescas = memoria / "frescas.md"
+    frescas.write_text(frontmatter("frescas", "Mudanza del vivero, paso a paso", "project")
+                       + "# Mudanza\n\nLo nuevo va abajo.\n\n" + paso(40, 0)
+                       + "".join(paso(d, k) for d in (2, 1, 0) for k in range(4)), encoding="utf-8", newline="\n")
+    sin_fechas = memoria / "sinfechas.md"
+    sin_fechas.write_text(frontmatter("sinfechas", "Cómo se cuida cada planta del vivero", "project")
+                          + "# Cuidados\n\nUna sección por planta.\n\n"
+                          + "".join(f"## Planta {k}\n\n" + "palabra " * 450 + "\n\n" for k in range(12)),
+                          encoding="utf-8", newline="\n")
+    bloque = memoria / "bloque.md"
+    bloque.write_text(frontmatter("bloque", "Inventario del vivero, todo seguido", "project") + "```text\n"
+                      + "".join(f"renglón {j} " + "palabra " * 12 + "\n" for j in range(400)) + "```\n",
+                      encoding="utf-8", newline="\n")
+    (memoria / "MEMORY.md").write_text("# Memoria\n\n- [Mudanza](frescas.md) — paso a paso\n"
+                                       "- [Cuidados](sinfechas.md) — una sección por planta\n"
+                                       "- [Inventario](bloque.md) — todo seguido\n", encoding="utf-8", newline="\n")
+
+    def configurar(**mas):
+        (mundo / "config.json").write_text(json.dumps(dict({"usuario": "Ana", "fuentes": [
+            {"id": "memoria", "nombre": "Memoria", "color": "#E64980", "raices": [[str(memoria), False, ""]],
+             "memoria": True, "foco": True}]}, **mas), ensure_ascii=False), encoding="utf-8", newline="\n")
+
+    def renglones():
+        return sorted(r for p in memoria.glob("*.md") for r in p.read_text(encoding="utf-8").split("\n") if r.strip())
+
+    def del_renglon(salida, nombre):
+        return next((r for r in salida.split("\n") if nombre in r), "")
+
+    viejo = time.time() - 3600
+    for nota in (frescas, sin_fechas, bloque):
+        os.utime(nota, (viejo, viejo))
+    todos = renglones()
+    configurar()
+    codigo, salida = cerebro_en(mundo, "--partir-llenas")
+    probar("--partir-llenas con «partir_sola» apagado no toca nada y lo dice",
+           codigo == 1 and "apagado" in salida and renglones() == todos and len(list(memoria.glob("*.md"))) == 4, salida)
+    configurar(partir_sola=True)
+    os.utime(sin_fechas, None)
+    codigo, salida = cerebro_en(mundo, "--dormir")
+    historia = memoria / "frescas-historia-1.md"
+    se_fue = historia.read_text(encoding="utf-8") if historia.exists() else ""
+    quedo = frescas.read_text(encoding="utf-8")
+    probar("cuando lo viejo no alcanza para aliviar la nota, la pasada se lleva también las entradas más viejas de estos "
+           "días a la nota de historia, y deja las últimas",
+           codigo == 0 and "Partió sola frescas.md" in salida and "pasaron a frescas-historia-1.md" in salida
+           and "paso 40.0\n" in se_fue and "paso 2.3\n" in se_fue and "paso 1.0\n" in se_fue
+           and all(f"paso 0.{k}\n" in quedo for k in range(4)) and "paso 2.0\n" not in quedo
+           and len(quedo.encode()) < 30000, (salida[-600:], len(quedo)))
+    probar("la que se estaba editando no la toca todavía y dice que vuelve a probar en media hora, sin mandar a nadie a "
+           "partirla a mano; la que es un solo bloque sí queda para partir a mano, con el porqué",
+           "menos de 10 minutos; vuelve a probar en media hora" in del_renglon(salida, "sinfechas.md")
+           and "A mano" not in del_renglon(salida, "sinfechas.md") and "un solo bloque" in del_renglon(salida, "bloque.md")
+           and "A mano" in del_renglon(salida, "bloque.md") and not (memoria / "sinfechas-parte-2.md").exists(),
+           salida[-600:])
+    ahora = time.time()
+    falso = mundo / "armar.py"
+    falso.write_text("import sys\nfrom pathlib import Path\nPath(__file__).with_name('lanzado.txt').write_text(sys.argv[1])\n",
+                     encoding="utf-8")
+    antes_de_tiempo = dormir.falta_partir(str(mundo), ahora + 60) or dormir.despertar(str(mundo), str(falso), ahora + 60)
+    lanzo = dormir.despertar(str(mundo), str(falso), ahora + 1801)
+    for _ in range(100):
+        if (mundo / "lanzado.txt").exists():
+            break
+        time.sleep(0.1)
+    lanzado = (mundo / "lanzado.txt").read_text(encoding="utf-8") if (mundo / "lanzado.txt").exists() else ""
+    probar("pasada media hora, el primer pedido larga de fondo solo la partición (no toda la pasada del día); antes, nada",
+           not antes_de_tiempo and lanzo and lanzado == "--partir-llenas", (antes_de_tiempo, lanzo, lanzado))
+    os.utime(sin_fechas, (viejo, viejo))
+    todos = renglones()
+    codigo, salida = cerebro_en(mundo, "--partir-llenas")
+    parte = memoria / "sinfechas-parte-2.md"
+    se_fue = parte.read_text(encoding="utf-8") if parte.exists() else ""
+    quedo = sin_fechas.read_text(encoding="utf-8")
+    cabeza = nucleo.separar_frontmatter(se_fue)[0]
+    en_parte = [k for k in range(12) if f"## Planta {k}\n" in se_fue]
+    agregados = [r for r in renglones() if r not in todos]
+    probar("la nota sin fechas se parte sola en dos: la primera mitad queda, la segunda pasa a «sinfechas-parte-2», cada "
+           "sección entera en una de las dos, y no se pierde ni un renglón",
+           codigo == 0 and "Partió sola sinfechas.md" in salida and 20000 < len(quedo.encode()) < 30000
+           and en_parte and en_parte == list(range(en_parte[0], 12))
+           and [k for k in range(12) if f"## Planta {k}\n" in quedo] == list(range(en_parte[0]))
+           and not [r for r in todos if r not in renglones()] and len(agregados) < 12,
+           (salida[-400:], len(quedo), en_parte, agregados))
+    probar("esa parte 2 nace como nota común (no archivo), queda en el índice y ya no hay nada esperando para reintentar",
+           nucleo.dato(cabeza, "description").startswith("Parte 2 de «Cuidados» (sigue de sinfechas): «Planta ")
+           and "](sinfechas-parte-2.md) — sigue de sinfechas: «Planta " in (memoria / "MEMORY.md").read_text(encoding="utf-8")
+           and not dormir.falta_partir(str(mundo), time.time() + 1801), cabeza)
+    aviso = dormir.aviso_partidas(str(mundo), "chat0001") or ""
+    registro = mundo / "respaldos" / "partidas.log"
+    anotado = registro.read_text(encoding="utf-8").splitlines() if registro.exists() else []
+    _, que_haria = cerebro_en(mundo, "--por-partir")
+    _, salud = cerebro_en(mundo, "--salud", "--todo")
+    probar("cada partición queda escrita en un registro (fecha, nota, qué pasó a dónde y la copia), --por-partir muestra lo "
+           "último, y a cada chat le avisa de las dos",
+           len(anotado) == 2 and "frescas.md" in anotado[0] and "pasaron a frescas-historia-1.md" in anotado[0]
+           and "sinfechas.md" in anotado[1] and "pasó a sinfechas-parte-2.md, que no es archivo" in anotado[1]
+           and all("copia de antes en " in r and re.match(r"\d{4}-\d\d-\d\d \d\d:\d\d  ", r) for r in anotado)
+           and "Lo último que partió sola" in que_haria and "sinfechas-parte-2.md" in que_haria
+           and "frescas-historia-1.md" in aviso and "sinfechas-parte-2.md" in aviso and "releela" in aviso,
+           (anotado, que_haria[-400:], aviso))
+    probar("el médico dice que la que quedó casi llena se parte sola o con --partir-llenas, y no se queja de las notas nuevas",
+           "--partir-llenas lo hace ahora" in del_renglon(salud, "bloque.md:1")
+           and "sinfechas-parte-2.md" not in salud and "frescas-historia-1.md" not in salud, salud[-900:])
+    partidas = {p.name: p.read_bytes() for p in memoria.glob("*.md")}
+    codigo, salida = cerebro_en(mundo, "--partir-llenas")
+    probar("volver a correrla no parte nada más: lo que ya quedó por debajo del tope no se toca",
+           codigo == 0 and {p.name: p.read_bytes() for p in memoria.glob("*.md")} == partidas
+           and len(registro.read_text(encoding="utf-8").splitlines()) == 2, salida[-300:])
+
+
+def revisar_pendientes(t):
+    seccion("Tablero de pendientes (--pendientes)")
+    import datetime
+    pendientes = importlib.import_module("pendientes")
+    hoy = datetime.date(2026, 10, 10)
+    cuerpo = ("# Vivero\n\n## 2026-09-20 — riego nuevo\n\nSe cambió la bomba. SIN PROBAR en el invernadero.\n\n"
+              "- Falta que Ana elija el horario.\n- **FALTA:** comprar el filtro; ~~falta pintar el tanque~~.\n"
+              "- Falta pintar la tapa: HECHO el 2/10.\n- Hace falta agua para regar y ya tiene TODO lo necesario.\n"
+              "- El cartel se guardó sin commit (8/10).\n- El precio lo decide Ana.\n- [ ] llamar al proveedor de macetas\n"
+              "- [x] medir el caudal\n- TODO en mayúsculas no es una tarea, pero TODO: revisar la bomba sí.\n"
+              "- Si falta luz, avisa. Late cuando espera el OK.\n- Riego ya probado el 3/10 (antes figuraba sin probar).\n"
+              "- No usar la balanza para decidir solo.\n- Para decidir con Ana: el color del cartel.\n\n"
+              "```text\nFalta: esto es un ejemplo dentro de un bloque\n```\n")
+    nota = {"id": "n", "ruta": "C:/m/vivero.md", "titulo": "Vivero", "_cuerpo": cuerpo, "_desfase": 7}
+    hallados = [(p["clase"], p["linea"], p["texto"], p["fecha"]) for p in pendientes.de_la_nota(nota, hoy)]
+    probar("de una nota saca las frases que dicen que algo falta y las clasifica (probar, decidir, commit, hacer), con su "
+           "renglón y la fecha de la frase o de su título; una casilla sin tildar y «TODO:» también cuentan",
+           hallados == [
+               ("probar", 12, "Se cambió la bomba. SIN PROBAR en el invernadero.", datetime.date(2026, 9, 20)),
+               ("hacer", 14, "Falta que Ana elija el horario.", None),
+               ("hacer", 15, "FALTA: comprar el filtro;", None),
+               ("commit", 18, "El cartel se guardó sin commit (8/10).", datetime.date(2026, 10, 8)),
+               ("decidir", 19, "El precio lo decide Ana.", None),
+               ("hacer", 20, "llamar al proveedor de macetas", None),
+               ("hacer", 22, "TODO en mayúsculas no es una tarea, pero TODO: revisar la bomba sí.", None),
+               ("decidir", 26, "Para decidir con Ana: el color del cartel.", None)], hallados)
+    textos = " ".join(texto for _, _, texto, _ in hallados)
+    probar("no toma lo que ya dice «hecho» o «probado», lo tachado, lo de adentro de un bloque de código, la casilla "
+           "tildada, ni «hace falta», «si falta», «cuando espera el OK» o «para decidir» en medio de una frase",
+           not any(malo in textos for malo in ("pintar la tapa", "pintar el tanque", "Hace falta", "Si falta", "espera el OK",
+                                               "ya probado", "balanza", "ejemplo dentro", "medir el caudal",
+                                               "lo necesario")), textos)
+    medico = importlib.import_module("medico")
+    regla = medico.regla_resuelto
+    medico.regla_resuelto = lambda cerebro: [medico.hallazgo("yaResuelto", "n", 13, "revisar", "x", "y"),
+                                             medico.hallazgo("yaResuelto", "otra", 19, "revisar", "x", "y")]
+    try:
+        marcados = pendientes.de_la_nota(nota, hoy)
+        cuantos = pendientes.marcar_resueltos(None, marcados)
+        medico.regla_resuelto = lambda cerebro: 1 / 0
+        sin_git = pendientes.marcar_resueltos(None, pendientes.de_la_nota(nota, hoy))
+    finally:
+        medico.regla_resuelto = regla
+    probar("marca «quizás ya está resuelto» solo en el pendiente que está en el mismo renglón, o en el de al lado, que un "
+           "aviso del médico de esa misma nota, y si no se pueden mirar los commits lo dice en vez de fallar",
+           cuantos == 2 and [p["linea"] for p in marcados if p["quizas"]] == [12, 14] and sin_git is None,
+           (cuantos, [(p["linea"], p["quizas"]) for p in marcados], sin_git))
+    grupos = [{"id": "vivero", "nombre": "El vivero"}, {"id": "taller", "nombre": "El taller"},
+              {"id": "@ninguno", "nombre": "Sin proyecto"}]
+    buscador = importlib.import_module("buscador")
+    conocidos = buscador.proyectos_conocidos
+    buscador.proyectos_conocidos = lambda: [("d:/vivero", {"alias": "vivero"}), ("d:/taller", {"alias": "taller"})]
+    try:
+        elegidos = [pendientes.elegir(pedido, grupos, {}, cwd) for pedido, cwd in (
+            ("", "D:\\vivero\\riego"), ("", "E:\\otra"), ("todos", "D:\\vivero"), ("El taller", "D:\\vivero"),
+            ("taller", "D:\\vivero"), ("el", "D:\\vivero"), ("nada", "D:\\vivero"))]
+    finally:
+        buscador.proyectos_conocidos = conocidos
+    probar("sin nombre muestra el proyecto de la carpeta donde estás (y todos si no estás en ninguno); con un nombre, ese "
+           "(entero o un pedazo que no sea ambiguo); con «todos», todos; y un nombre que no conoce lo dice con la lista",
+           [e[0] and e[0]["id"] for e in elegidos[:5]] == ["vivero", None, None, "taller", "taller"]
+           and elegidos[5][0] is None and "más de uno" in elegidos[5][1] and "El vivero" in elegidos[5][1]
+           and elegidos[6][0] is None and "no conozco" in elegidos[6][1] and "todos" in elegidos[6][1], elegidos)
+    lista = [dict(clase=c, nota=n, ruta=f"C:/m/{n}.md", titulo=n, linea=k + 1, texto=f"cosa {k}", fecha=f, dias=d, quizas=q)
+             for k, (c, n, f, d, q) in enumerate(
+                 [("probar", "a", datetime.date(2026, 9, 20), 20, False), ("probar", "a", datetime.date(2026, 9, 1), 39, False),
+                  ("probar", "a", None, None, True), ("hacer", "b", datetime.date(2026, 10, 9), 1, False)]
+                 + [("hacer", "a", datetime.date(2026, 10, 1), 9, False)] * 10)]
+    de_nodo = {"a": "vivero", "b": "taller"}
+    propio = pendientes.texto(lista, grupos, de_nodo, grupos[0], False, 1, "neuromapa")
+    todos = pendientes.texto(lista, grupos, de_nodo, None, True, 1, "neuromapa")
+    probar("el tablero de un proyecto cuenta los suyos, avisa los de más de 14 días y los que quizás ya están resueltos, "
+           "pone primero lo más viejo y al final lo que no tiene fecha, corta cada clase en 8 y dice cuántos hay en los "
+           "otros proyectos",
+           propio[0] == "Pendientes anotados de «El vivero»: 13 en 1 nota (2 con más de 14 días; 1 que quizás ya está "
+                        "resuelto)."
+           and propio[1:5] == ["Falta probar (3):", "  a.md:2 · 1/9 (hace 39 días) — cosa 1",
+                               "  a.md:1 · 20/9 (hace 20 días) — cosa 0", "  a.md:3 · quizás ya está resuelto — cosa 2"]
+           and "Falta hacer (10):" in propio
+           and "  … y 2 más (con --todo salen todos)" in propio and not any("b.md" in r for r in propio)
+           and sum(1 for r in propio if " — cosa " in r) == 11
+           and any(r.startswith("En los otros proyectos: El taller 1.") for r in propio), propio)
+    probar("con «todos» y --todo salen todos, con la cuenta por proyecto de cada clase",
+           todos[0].startswith("Pendientes anotados: 14 en 2 notas") and "  por proyecto: El vivero 10, El taller 1" in todos
+           and sum(1 for r in todos if " — cosa " in r) == 14 and not any("más (con --todo" in r for r in todos), todos)
+    mundo = t / "pendientes"
+    memoria = mundo / "memoria"
+    memoria.mkdir(parents=True)
+    (mundo / "en-vivo").mkdir()
+    (memoria / "MEMORY.md").write_text("# Memoria\n\n- [Vivero](vivero.md) — riego\n- [Viejo (archivo)](viejo.md) — antes\n",
+                                       encoding="utf-8", newline="\n")
+    (memoria / "vivero.md").write_text(frontmatter("vivero", "El riego del vivero", "project") + cuerpo, encoding="utf-8",
+                                       newline="\n")
+    (memoria / "viejo.md").write_text(frontmatter("viejo", "(archivo) Lo de antes del vivero", "project")
+                                      + "# Viejo (archivo)\n\n- Falta cambiar la manguera.\n", encoding="utf-8", newline="\n")
+    (mundo / "config.json").write_text(json.dumps({"usuario": "Ana", "fuentes": [
+        {"id": "memoria", "nombre": "Memoria", "color": "#E64980", "raices": [[str(memoria), False, ""]],
+         "memoria": True, "foco": True}]}, ensure_ascii=False), encoding="utf-8", newline="\n")
+    antes = {p.name: p.read_bytes() for p in memoria.glob("*.md")}
+    codigo, salida = cerebro_en(mundo, "--pendientes", "todos")
+    codigo_malo, salida_mala = cerebro_en(mundo, "--pendientes", "no-existe")
+    probar("--pendientes lee las memorias (no las de archivo), no cambia nada y da el renglón de cada frase en su archivo",
+           codigo == 0 and "Pendientes anotados: 8 en 1 nota" in salida and "vivero.md:16 — FALTA: comprar el filtro;" in salida
+           and "manguera" not in salida and {p.name: p.read_bytes() for p in memoria.glob("*.md")} == antes
+           and codigo_malo == 1 and "no conozco el proyecto «no-existe»" in salida_mala and "Traceback" not in salida_mala,
+           (salida[-900:], salida_mala[-300:]))
+
+
+def revisar_reglas(t):
+    seccion("Reglas por carpeta sacadas de la memoria (--reglas, --regla)")
+    reglas = importlib.import_module("reglas")
+    probar("el patrón de la carpeta escapa los corchetes y las llaves, y va entre comillas simples para que el YAML no "
+           "tome la barra invertida como un escape",
+           reglas.patron("Datos [viejos]/a{b}") == "Datos \\[viejos\\]/a\\{b\\}/**/*"
+           and reglas.entre_comillas("l'eau/**/*") == "'l''eau/**/*'",
+           (reglas.patron("Datos [viejos]/a{b}"), reglas.entre_comillas("l'eau/**/*")))
+    votos = {("r", "a"): 5, ("r", "a/b"): 3, ("r", "c"): 2, ("r", "a/b/c"): 2}
+    elegidas = (reglas.mejor(votos, 5, 3), reglas.mejor(votos, 5, 4), reglas.mejor(votos, 10, 3))
+    probar("de las carpetas votadas elige la más honda que junta el mínimo y el 60 % de todo lo que se contó",
+           elegidas == (("r", "a/b"), ("r", "a"), None), elegidas)
+    mundo = t / "reglas"
+    memoria = mundo / "memoria"
+    proyecto = mundo / "vivero"
+    bombas = proyecto / "riego" / "bombas"
+    semillas = proyecto / "datos" / "semillas"
+    for carpeta in (memoria, mundo / "en-vivo", bombas, semillas, proyecto / "src"):
+        carpeta.mkdir(parents=True)
+    de_bombas = [bombas / n for n in ("bomba.py", "caudal.py", "valvula.py")]
+    de_src = [proyecto / "src" / f"m{i}.py" for i in range(20)]
+    for archivo in de_bombas + de_src + [semillas / "tomate.txt", semillas / "albahaca.txt", proyecto / "riego" / "plan.md"]:
+        archivo.write_text("x\n", encoding="utf-8", newline="\n")
+    relleno = "Texto de relleno sobre el riego del vivero. " * 70
+    de_semillas = ("En `datos\\semillas\\` los archivos son Latin-1: `tomate.txt` y `albahaca.txt`. El plan está en "
+                   "`riego\\plan.md`.\n")
+    notas = {
+        "bombas": ("Las bombas", "Las bombas del riego se purgan antes de prender", "feedback",
+                   "Purgar la bomba antes de prenderla. Relacionado: [[semillas-latin1]].\n"),
+        "riego-largo": ("El riego", "Todo el riego del vivero, con su historia", "project", relleno + "\n"),
+        "semillas-latin1": ("Semillas en Latin-1", "Los datos de semillas no son UTF-8", "project", de_semillas),
+        "plan-largo": ("Plan largo", "El plan largo de las semillas", "project",
+                       "En `datos\\semillas\\` están `tomate.txt` y `albahaca.txt`. " + relleno + "\n"),
+        "ancha": ("Nota ancha", "Se usa con medio proyecto", "project", "Se usa con todo.\n"),
+        "suelta": ("Nota suelta", "Nombra un documento y un archivo", "project",
+                   "Ver `riego\\plan.md` (sí, `riego\\plan.md`) y `riego\\bombas\\bomba.py`.\n"),
+        "nombra": ("Nota que nombra", "Nombra la carpeta y nada más", "project", "Ver `datos\\semillas\\`.\n"),
+        "viejo": ("Viejo (archivo)", "(archivo) Lo de antes", "project",
+                  "En `datos\\semillas\\` estaban `tomate.txt` y `albahaca.txt`.\n"),
+        "dos": ("Nota de dos", "Se leyó con dos archivos de una carpeta", "project", "Se leyó con dos archivos.\n"),
+    }
+    (memoria / "MEMORY.md").write_text("# Memoria\n\n" + "".join(
+        f"- [{titulo}]({nombre}.md) — {descripcion}\n" for nombre, (titulo, descripcion, _, _) in notas.items()),
+        encoding="utf-8", newline="\n")
+    for nombre, (_, descripcion, tipo, cuerpo) in notas.items():
+        (memoria / f"{nombre}.md").write_text(frontmatter(nombre, descripcion, tipo) + cuerpo, encoding="utf-8", newline="\n")
+    c = aprender.clave
+    de_dos = [semillas / "tomate.txt", semillas / "albahaca.txt"]
+    usados = {"bombas": de_bombas, "riego-largo": de_bombas, "ancha": de_src[:6], "dos": de_dos}
+    lazos = {}
+    for nombre, archivos in usados.items():
+        for archivo in archivos:
+            lazos.setdefault(c(str(memoria / f"{nombre}.md")), {})[c(str(archivo))] = 4.0
+            lazos.setdefault(c(str(archivo)), {})[c(str(memoria / f"{nombre}.md"))] = 4.0
+    conocidos = [str(a) for a in de_bombas + de_src + de_dos] + [str(memoria / f"{nombre}.md") for nombre in notas]
+    (mundo / "en-vivo" / aprender.ARCHIVO).write_text(json.dumps(
+        {"version": aprender.VERSION, "hecho": time.time(), "lazos": lazos, "veces": {c(a): 8.0 for a in conocidos},
+         "rutas": {c(a): a for a in conocidos}}), encoding="utf-8")
+    (mundo / "config.json").write_text(json.dumps({"usuario": "Ana", "fuentes": [
+        {"id": "memoria", "nombre": "Memoria", "color": "#E64980", "raices": [[str(memoria), False, ""]],
+         "memoria": True, "foco": True, "proyecto": str(proyecto)}],
+        "proyectos": [{"raiz": str(proyecto), "alias": "vivero", "nombre": "El vivero"}]}, ensure_ascii=False),
+        encoding="utf-8", newline="\n")
+    antes = {p.name: p.read_bytes() for p in memoria.glob("*.md")}
+    codigo, salida = cerebro_en(mundo, "--reglas", "todos")
+    probar("--reglas propone la memoria que se leyó con 3 archivos de una carpeta angosta y la corta que nombra una carpeta "
+           "y archivos suyos; no la larga que solo la nombra, ni la de archivo, ni la que nombra documentos y un archivo "
+           "suelto, ni la que nombra la carpeta y nada más, ni la que se leyó con solo dos archivos de una carpeta, ni la "
+           "que se usa con medio proyecto (y dice que esa quedó afuera por ancha); no escribe nada",
+           codigo == 0 and "Memorias que pueden ser una regla por carpeta: 3." in salida
+           and all(x in salida for x in ("  bombas · ", "  riego-largo · ", "  semillas-latin1 · "))
+           and not any(x in salida for x in ("plan-largo", "  ancha · ", "  suelta · ", "  viejo · ", "  nombra · ", "  dos · "))
+           and "carpeta: riego/bombas/ — se leyó junto con 3 archivos de esa carpeta (de 3 con los que se usó)" in salida
+           and "ahí está el 12 % de lo que se toca del proyecto" in salida
+           and "carpeta: datos/semillas/ — la nota nombra esa carpeta o archivos suyos" in salida
+           and salida.index("  bombas · ") < salida.index("  semillas-latin1 · ")
+           and "1 memoria se usa con una carpeta demasiado ancha" in salida and "no existe todavía" in salida
+           and not (proyecto / ".claude").exists() and "Traceback" not in salida, salida[-1500:])
+    destino = proyecto / ".claude" / "rules" / "semillas-latin1.md"
+    codigo, vista = cerebro_en(mundo, "--regla", "semillas-latin1")
+    clave = re.search(r"--confirmar ([0-9a-f]{8})", vista)
+    probar("--regla muestra el texto de la regla, con la carpeta en paths y de qué memoria sale, y el código para "
+           "escribirla; no cambia nada",
+           codigo == 0 and clave and "    - 'datos/semillas/**/*'" in vista and "  neuromapa: 'semillas-latin1.md'" in vista
+           and "semillas-latin1.md (no existe todavía)" in vista and "viaja con él" in vista and not destino.exists(), vista)
+    _, vista_corta = cerebro_en(mundo, "--regla", "bombas.md")
+    _, vista_larga = cerebro_en(mundo, "--regla", "riego-largo")
+    probar("una memoria corta va entera (con sus enlaces [[…]] pasados a nombres) y una larga lleva su descripción y el "
+           "aviso de leerla, no su texto",
+           "Purgar la bomba antes de prenderla. Relacionado: `semillas-latin1`." in vista_corta
+           and "Esta regla es una copia de la memoria `bombas.md`" in vista_corta
+           and "Todo el riego del vivero, con su historia" in vista_larga and "Texto de relleno" not in vista_larga
+           and "Antes de tocar estos archivos leé la memoria `riego-largo.md`" in vista_larga
+           and "    - 'riego/bombas/**/*'" in vista_larga, (vista_corta[-600:], vista_larga[-600:]))
+    codigo_malo, salida_mala = cerebro_en(mundo, "--regla", "semillas-latin1", "--confirmar", "0" * 8)
+    sin_escribir = not destino.exists()
+    codigo, escrita = cerebro_en(mundo, "--regla", "semillas-latin1", "--confirmar", clave.group(1) if clave else "x")
+    texto = destino.read_bytes().decode("utf-8") if destino.is_file() else ""
+    probar("con un código que no es el que mostró no escribe nada; con el suyo escribe la regla en .claude/rules/ del "
+           "proyecto, en LF, con el texto de la memoria y sin tocar la memoria",
+           codigo_malo == 2 and "ese código ya no vale" in salida_mala and sin_escribir and codigo == 0
+           and f"Regla escrita: {destino}" in escrita
+           and texto.startswith("---\npaths:\n  - 'datos/semillas/**/*'\nneuromapa: 'semillas-latin1.md'\n---\n\n# ")
+           and de_semillas in texto and "\r" not in texto
+           and texto.endswith("Esta regla es una copia de la memoria `semillas-latin1.md`: si no coinciden, vale la memoria.\n")
+           and {p.name: p.read_bytes() for p in memoria.glob("*.md")} == antes, (salida_mala, escrita, texto))
+    _, del_proyecto = cerebro_en(mundo, "--reglas", "vivero")
+    _, repetida = cerebro_en(mundo, "--regla", "semillas-latin1")
+    probar("después la lista dice que esa ya está escrita y al día, y no ofrece volver a escribirla",
+           "Memorias que pueden ser una regla por carpeta para «El vivero»: 3." in del_proyecto
+           and "semillas-latin1.md (ya está escrita y al día)" in del_proyecto and "--confirmar" not in repetida, del_proyecto)
+    ahora = time.time()
+    cargadas = [{"t": ahora - 7200, "f": str(destino)}, {"t": ahora - 60, "f": str(destino).replace("\\", "/").upper()},
+                {"t": ahora - 30, "f": str(destino), "z": 1}, {"t": ahora - 40 * 86400, "f": str(destino)},
+                {"t": ahora - 50, "f": str(destino.with_name("otra.md"))},
+                {"t": ahora - 20, "f": str(destino), "e": "post", "k": "leer"}]
+    (mundo / "en-vivo" / "eventos.jsonl").write_bytes(b"".join(
+        json.dumps(dict({"s": "aaaa1111", "e": "regla", "h": "", "k": "regla"}, **ev), ensure_ascii=False,
+                   separators=(",", ":")).encode("utf-8") + b"\r\n" for ev in cargadas))
+    _, con_cargas = cerebro_en(mundo, "--reglas", "vivero")
+    _, vista_cargada = cerebro_en(mundo, "--regla", "semillas-latin1")
+    ultima = time.localtime(ahora - 60)
+    probar("la lista dice cuántas veces cargó Claude Code cada regla ya escrita en los últimos 30 días y cuándo fue la "
+           "última (y, si no hay ninguna anotada, que se anotan desde que está el hook); no cuenta las cargas de prueba, "
+           "las de hace más de 30 días, las de otra regla ni una lectura del archivo; de las que no están escritas no "
+           "dice nada",
+           del_proyecto.count("sin cargas anotadas en los últimos 30 días (se anotan desde que está puesto el hook") == 1
+           and con_cargas.count("Claude Code la cargó") == 1 and "sin cargas anotadas" not in con_cargas
+           and f"      Claude Code la cargó 2 veces en los últimos 30 días (la última, el {ultima.tm_mday}/{ultima.tm_mon} a "
+               f"las {time.strftime('%H:%M', ultima)})" in con_cargas
+           and "  Claude Code la cargó 2 veces en los últimos 30 días" in vista_cargada
+           and reglas.cargas(mundo / "no-existe") == {}, (del_proyecto[-700:], con_cargas[-700:], vista_cargada[:500]))
+    (memoria / "semillas-latin1.md").write_text(
+        frontmatter("semillas-latin1", "Los datos de semillas no son UTF-8", "project") + de_semillas
+        + "También `perejil.txt`.\n", encoding="utf-8", newline="\n")
+    _, cambiada = cerebro_en(mundo, "--regla", "semillas-latin1")
+    nueva = re.search(r"--confirmar ([0-9a-f]{8})", cambiada)
+    codigo_viejo, _ = cerebro_en(mundo, "--regla", "semillas-latin1", "--confirmar", clave.group(1) if clave else "x")
+    codigo, reescrita = cerebro_en(mundo, "--regla", "semillas-latin1", "--confirmar", nueva.group(1) if nueva else "x")
+    copias = sorted((mundo / "respaldos").glob("*-regla/1-semillas-latin1.md"))
+    probar("si la memoria cambia, avisa que la regla quedó vieja, el código anterior deja de valer y al volver a escribirla "
+           "guarda una copia de la que había",
+           "se puede volver a escribir" in cambiada and nueva and clave and nueva.group(1) != clave.group(1)
+           and codigo_viejo == 2 and codigo == 0 and "perejil.txt" in destino.read_text(encoding="utf-8")
+           and len(copias) == 1 and copias[0].read_bytes().decode("utf-8") == texto and "quedó copiada" in reescrita,
+           (cambiada[-400:], reescrita, copias))
+    ajena = proyecto / ".claude" / "rules" / "bombas.md"
+    ajena.write_text("# Mi regla, escrita a mano\n", encoding="utf-8", newline="\n")
+    _, vista_ajena = cerebro_en(mundo, "--regla", "bombas")
+    candidata = {"nodo": {"id": "b", "ruta": str(memoria / "bombas.md"), "titulo": "Las bombas", "descripcion": "",
+                          "_cuerpo": "Purgar.\n"},
+                 "raiz": "r", "donde": proyecto,
+                 "carpetas": [{"nombre": "riego/bombas", "carpeta": "riego/bombas", "usados": 3, "de": 3, "dichas": 0,
+                               "ancho": None}]}
+    negada = reglas.escribir(candidata, mundo)
+    probar("una regla con ese nombre que no escribió Neuromapa no se pisa: lo dice, no da código y, aunque se le pida "
+           "escribir, la deja como estaba",
+           "no se toca" in vista_ajena and "--confirmar" not in vista_ajena and negada[0] is None
+           and "no la toco" in (negada[2] or "") and ajena.read_text(encoding="utf-8") == "# Mi regla, escrita a mano\n",
+           (vista_ajena[-400:], negada))
+    del_taller = dict(candidata, nodo=dict(candidata["nodo"], ruta=str(memoria / "torno.md"), titulo="El torno"),
+                      raiz="d:/taller", donde=mundo / "taller")
+    grupos = [{"clave": "r", "id": "vivero", "nombre": "El vivero"}, {"clave": "d:/taller", "id": "taller", "nombre": "El taller"}]
+    de_uno = reglas.texto([candidata, del_taller], 0, grupos, grupos[1], "neuromapa", False)
+    de_todos = reglas.texto([candidata, del_taller], 2, grupos, None, "neuromapa")
+    probar("la lista de un proyecto trae solo las suyas y cuenta aparte las de los otros; la de todos las agrupa por "
+           "proyecto; sin nada aprendido lo dice",
+           de_uno[0] == "Memorias que pueden ser una regla por carpeta para «El taller»: 1."
+           and any(r.startswith("  torno · «El torno»") for r in de_uno) and not any("bombas ·" in r for r in de_uno)
+           and any(r.startswith("En los otros proyectos: El vivero 1.") for r in de_uno)
+           and any("no hay nada aprendido del uso" in r for r in de_uno)
+           and de_todos[0] == "Memorias que pueden ser una regla por carpeta: 2." and "El vivero:" in de_todos
+           and "El taller:" in de_todos and any(r.startswith("2 memorias se usan con una carpeta demasiado ancha") for r in de_todos)
+           and not any("no hay nada aprendido" in r for r in de_todos), (de_uno, de_todos))
+    codigo_nada, salida_nada = cerebro_en(mundo, "--regla", "ancha")
+    codigo_otro, salida_otra = cerebro_en(mundo, "--reglas", "no-existe")
+    probar("pedir la regla de una memoria que no es candidata, o las de un proyecto que no existe, lo dice sin romperse",
+           codigo_nada == 2 and "no está entre las memorias" in salida_nada and codigo_otro == 1
+           and "no conozco el proyecto «no-existe»" in salida_otra and "Traceback" not in salida_nada + salida_otra,
+           (salida_nada, salida_otra))
+
+
+def revisar_recetas(t):
+    seccion("Recetas que pueden ser skills (--recetas, --receta)")
+    recetas = importlib.import_module("recetas")
+    de_regar = ("## Cómo regar el invernadero\n\n1. Abrir la llave.\n2. Correr `python regar.py --zona 2`.\n"
+                "3. Cerrar la llave. Ver [[bombas]].\n")
+    cuerpo = ("# Vivero\n\n" + de_regar + "\n## Cómo era antes\n\n1. Se regaba a mano.\n2. Con balde.\n3. Y con paciencia.\n\n"
+              "## Notas\n\n- **Cómo se mide el caudal:** con `medir.py --litros` y después `git log -1`.\n"
+              "  - y si hace falta, `otro.py`.\n- Para regar hay que tener agua, y `bomba.py --ya` y `git status` ayudan.\n"
+              "- **Pasos:** uno solo, sin comandos.\n- **Cómo se llama la bomba:** Berta.\n"
+              "- **Cómo se prende:** con `prender.py`.\n\n## Cómo podar el rosal\n\n1. Cortar las ramas secas.\n"
+              "2. Juntarlas.\n")
+    nota = {"id": "n", "ruta": "C:/m/vivero.md", "titulo": "Vivero", "_cuerpo": cuerpo, "_desfase": 7}
+    halladas = recetas.de_la_nota(nota)
+    resumen = [(r["numero"], r["titulo"], r["linea"], r["pasos"], r["comandos"]) for r in halladas]
+    probar("una receta es una sección o un ítem que empieza diciendo cómo se hace algo («Cómo regar…», «Cómo se mide…:») y "
+           "trae 3 pasos numerados o 2 comandos; sale con su renglón y su número dentro de la nota",
+           resumen == [(1, "Cómo regar el invernadero", 10, 3, 1), (2, "Cómo se mide el caudal", 24, 0, 3)], resumen)
+    probar("no toma «Cómo era antes» (no es cómo hacer algo), ni una frase que empieza con «Para regar» sin ser un rótulo, "
+           "ni un rótulo sin pasos y con un solo comando o ninguno, ni una sección con solo dos pasos; y el ítem se lleva "
+           "sus renglones de abajo",
+           len(halladas) == 2 and "`otro.py`" in halladas[1]["texto"] and "Para regar" not in halladas[1]["texto"]
+           and "Cerrar la llave" in halladas[0]["texto"] and "Cómo era antes" not in halladas[0]["texto"],
+           [r["texto"] for r in halladas])
+    larga = dict(halladas[0], ruta="C:/m/Riego Ñandú.md", titulo="Cómo se mide (él) " + "x" * 80, nota_titulo="Riego",
+                 donde=None, raiz="", veces=0.0)
+    nombre = recetas.nombre_de(larga)
+    probar("el nombre de la skill sale de la nota y del título, sin acentos ni signos, y no pasa de 64 letras",
+           nombre.startswith("riego-nandu-como-se-mide-el-xxx") and len(nombre) <= 64 and re.fullmatch(r"[a-z0-9-]+", nombre)
+           and not nombre.endswith("-"), nombre)
+    con_uso = [dict(halladas[0], raiz="d:/vivero", donde=t / "no-existe", veces=7.5, nota_titulo="Vivero"),
+               dict(halladas[1], raiz="", donde=t / "no-existe", veces=0.0, nota_titulo="Vivero")]
+    grupos = [{"clave": "d:/vivero", "id": "vivero", "nombre": "El vivero"}]
+    todas = recetas.texto(con_uso, grupos, None, "neuromapa")
+    propias = recetas.texto(con_uso, grupos, grupos[0], "neuromapa", False)
+    probar("la lista marca las de notas que se leen seguido, las agrupa por proyecto y, si se pide un proyecto, cuenta "
+           "aparte las de los otros; sin nada aprendido lo dice",
+           todas[0] == "Recetas en las memorias: 2 (1 de una nota que se usa seguido)." and "El vivero:" in todas
+           and "Sin proyecto:" in todas and any("la nota se leyó 7,5 veces (se usa seguido)" in r for r in todas)
+           and any("sin lecturas anotadas" in r for r in todas)
+           and propias[0] == "Recetas en las memorias de «El vivero»: 1 (1 de una nota que se usa seguido)."
+           and any(r.startswith("En los otros proyectos: Sin proyecto 1.") for r in propias)
+           and any("no sé cuáles se usan seguido" in r for r in propias)
+           and not any("no sé cuáles" in r for r in todas), (todas, propias))
+    mundo = t / "recetas"
+    memoria = mundo / "memoria"
+    proyecto = mundo / "vivero"
+    for carpeta in (memoria, mundo / "en-vivo", proyecto):
+        carpeta.mkdir(parents=True)
+    (memoria / "MEMORY.md").write_text("# Memoria\n\n- [Riego del vivero](riego-vivero.md) — cómo se riega\n"
+                                       "- [Costumbres](costumbres.md) — cómo trabajar\n"
+                                       "- [Riego viejo del vivero (archivo)](riego-viejo-vivero.md) — antes\n",
+                                       encoding="utf-8", newline="\n")
+    (memoria / "riego-viejo-vivero.md").write_text(
+        frontmatter("riego-viejo-vivero", "(archivo) Cómo se regaba el vivero", "project")
+        + "# Riego viejo del vivero (archivo)\n\n- **Cómo regar:** `python viejo.py --ya` y `git status`.\n",
+        encoding="utf-8", newline="\n")
+    (memoria / "riego-vivero.md").write_text(frontmatter("riego-vivero", "Cómo se riega el vivero", "project")
+                                             + "# Riego del vivero\n\n" + de_regar, encoding="utf-8", newline="\n")
+    (memoria / "costumbres.md").write_text(
+        frontmatter("costumbres", "Cómo trabajar", "feedback")
+        + "- **Cómo guardar:** `git add -A` y después `git commit -m x`.\n", encoding="utf-8", newline="\n")
+    (mundo / "config.json").write_text(json.dumps({"usuario": "Ana", "fuentes": [
+        {"id": "memoria", "nombre": "Memoria", "color": "#E64980", "raices": [[str(memoria), False, ""]],
+         "memoria": True, "foco": True}],
+        "proyectos": [{"raiz": str(proyecto), "alias": "vivero", "nombre": "El vivero"}]}, ensure_ascii=False),
+        encoding="utf-8", newline="\n")
+    antes = {p.name: p.read_bytes() for p in memoria.glob("*.md")}
+    codigo, salida = cerebro_en(mundo, "--recetas", "todos")
+    probar("--recetas lista las recetas de las memorias con su proyecto (y «Sin proyecto» la de una regla de trabajo); "
+           "no cambia nada",
+           codigo == 0 and "Recetas en las memorias: 2." in salida and "El vivero:" in salida and "Sin proyecto:" in salida
+           and "  riego-vivero:1 · «Cómo regar el invernadero» — riego-vivero.md:" in salida
+           and "  costumbres:1 · «Cómo guardar» — costumbres.md:" in salida and "Traceback" not in salida
+           and not (proyecto / ".claude").exists(), salida[-1200:])
+    destino = proyecto / ".claude" / "skills" / "riego-vivero-como-regar-el-invernadero" / "SKILL.md"
+    codigo, vista = cerebro_en(mundo, "--receta", "riego-vivero")
+    clave = re.search(r"--confirmar ([0-9a-f]{8})", vista)
+    _, vista_personal = cerebro_en(mundo, "--receta", "costumbres:1")
+    personal = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "skills" / "costumbres-como-guardar" / "SKILL.md"
+    probar("--receta muestra cómo quedaría como skill y dónde iría: en .claude/skills/ del proyecto de la nota, o en la "
+           "carpeta personal de skills si la nota no es de ningún proyecto; no cambia nada",
+           codigo == 0 and clave and f"iría en: {destino} (no existe todavía)" in vista
+           and "  name: riego-vivero-como-regar-el-invernadero" in vista and "    neuromapa: 'riego-vivero.md'" in vista
+           and f"iría en: {personal} (no existe todavía)" in vista_personal and not destino.exists()
+           and not personal.exists(), (vista, vista_personal[:400]))
+    codigo_malo, _ = cerebro_en(mundo, "--receta", "riego-vivero:1", "--confirmar", "0" * 8)
+    sin_escribir = not destino.exists()
+    codigo, escrita = cerebro_en(mundo, "--receta", "riego-vivero:1", "--confirmar", clave.group(1) if clave else "x")
+    texto = destino.read_bytes().decode("utf-8") if destino.is_file() else ""
+    _, despues = cerebro_en(mundo, "--recetas", "vivero")
+    probar("con el código que mostró escribe la skill, en LF, con su nombre, su descripción y el texto de la receta (los "
+           "enlaces [[…]] pasados a nombres); con otro código no escribe; después la lista dice que ya es una skill",
+           codigo_malo == 2 and sin_escribir and codigo == 0 and f"Skill escrita: {destino}" in escrita
+           and texto.startswith("---\nname: riego-vivero-como-regar-el-invernadero\ndescription: 'Cómo regar el invernadero "
+                                "(Riego del vivero). Usar cuando haya que hacer eso; los pasos salen de la memoria "
+                                "riego-vivero.md.'\nmetadata:\n  neuromapa: 'riego-vivero.md'\n---\n\n"
+                                "## Cómo regar el invernadero\n\n1. Abrir la llave.\n")
+           and "3. Cerrar la llave. Ver `bombas`.\n" in texto and "\r" not in texto
+           and texto.endswith("de la memoria `riego-vivero.md`: si no coinciden, vale la memoria.\n")
+           and "ya es una skill y está al día" in despues
+           and {p.name: p.read_bytes() for p in memoria.glob("*.md")} == antes, (escrita, texto, despues[:500]))
+    (memoria / "riego-vivero.md").write_text(frontmatter("riego-vivero", "Cómo se riega el vivero", "project")
+                                             + "# Riego del vivero\n\n" + de_regar + "4. Anotar los litros.\n",
+                                             encoding="utf-8", newline="\n")
+    _, cambiada = cerebro_en(mundo, "--receta", "riego-vivero:1")
+    nueva = re.search(r"--confirmar ([0-9a-f]{8})", cambiada)
+    codigo_viejo, _ = cerebro_en(mundo, "--receta", "riego-vivero:1", "--confirmar", clave.group(1) if clave else "x")
+    sin_cambiar = destino.read_bytes().decode("utf-8") == texto
+    codigo, reescrita = cerebro_en(mundo, "--receta", "riego-vivero:1", "--confirmar", nueva.group(1) if nueva else "x")
+    copias = sorted((mundo / "respaldos").glob("*-skill/1-SKILL.md"))
+    probar("si la receta cambia en la memoria, el código anterior deja de valer y, al volver a escribir la skill con el "
+           "nuevo, guarda una copia de la que había",
+           nueva and clave and nueva.group(1) != clave.group(1) and codigo_viejo == 2 and sin_cambiar and codigo == 0
+           and "4. Anotar los litros." in destino.read_text(encoding="utf-8") and len(copias) == 1
+           and copias[0].read_bytes().decode("utf-8") == texto and "quedó copiada" in reescrita,
+           (cambiada[-400:], reescrita, copias))
+    destino.write_text("---\nname: otra\n---\n\nEscrita a mano.\n", encoding="utf-8", newline="\n")
+    _, vista_ajena = cerebro_en(mundo, "--receta", "riego-vivero")
+    negada = recetas.escribir(dict(halladas[0], ruta=str(memoria / "riego-vivero.md"), nota_titulo="Riego del vivero",
+                                   donde=proyecto, raiz="r", veces=0.0), mundo)
+    codigo_numero, salida_numero = cerebro_en(mundo, "--receta", "riego-vivero:9")
+    codigo_nada, salida_nada = cerebro_en(mundo, "--receta", "no-existe")
+    probar("una skill con ese nombre que no escribió Neuromapa no se pisa, y pedir una receta que no existe lo dice sin "
+           "romperse",
+           "no se toca" in vista_ajena and "--confirmar" not in vista_ajena and negada[0] is None
+           and "Escrita a mano." in destino.read_text(encoding="utf-8") and codigo_numero == 2
+           and "no hay número 9" in salida_numero and codigo_nada == 2 and "no encontré esa receta" in salida_nada
+           and "Traceback" not in salida_numero + salida_nada, (vista_ajena[-300:], negada, salida_numero, salida_nada))
+
+
 def revisar_historial(t):
     seccion("Historial de la memoria (nada de lo que se borre se pierde)")
     historial = importlib.import_module("historial")
     memoria = t / "memoria"
     nueva = memoria / "historial-prueba.md"
     suelta = memoria / "historial-prueba.txt"
+    de_hoy_afuera = t / "ideas" / "zapallar-de-hoy.md"
     dato = "El riego del vivero arranca a las 06:15 en verano"
 
     def salida_de(funcion, *argumentos):
@@ -4290,11 +5615,227 @@ def revisar_historial(t):
                and '--historial "texto"' in salud, salud)
         codigo, nada = salida_de(historial.main, "texto que nunca existió")
         probar("un texto que nunca estuvo lo dice claro", "no aparece en la memoria de hoy ni en su historial" in nada, nada)
+        buscador = importlib.import_module("buscador")
+        raices_antes = [list(f["raices"]) for f in historial.nucleo.FUENTES]
+        escribir(nueva, "# Prueba\n\nEl riego nocturno del zapallar arranca a las 05:40.\n")
+        historial.guardar()
+        de_antes = max(historial.versiones(carpeta))
+        while time.time() < de_antes + 1.05:
+            time.sleep(0.05)
+        escribir(nueva, "# Prueba\n\nEl riego nocturno del zapallar arranca a las 07:10.\n")
+        escribir(de_hoy_afuera, "# Zapallar\n\nEl riego nocturno del zapallar se revisa a las 09:15.\n")
+        historial.guardar()
+        en_disco = sorted(os.listdir(memoria))
+        cuando = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(de_antes))
+        codigo, de_ese_dia = salida_de(historial.main_al, "riego nocturno zapallar", cuando, False)
+        codigo_sobre, sobre_ese_dia = salida_de(historial.main_al, "riego nocturno zapallar", cuando, True)
+        de_hoy = "\n".join(buscador.responder(buscador.desde_disco(guardado=False), "riego nocturno zapallar"))
+        version = re.search(r'show ([0-9a-f]{7,}):"historial-prueba\.md"', de_ese_dia)
+        probar("--buscar y --sobre con --al responden con la memoria como estaba ese día, sacada del historial: traen el "
+               "dato de entonces y no el de hoy, con las rutas de la memoria de verdad y el comando para leer la nota "
+               "entera de ese día; no mezclan los documentos de hoy de las otras fuentes, no cambian la memoria ni dejan "
+               "la carpeta temporal puesta en las fuentes",
+               codigo == 0 and codigo_sobre == 0 and "arranca a las 05:40" in de_ese_dia and "07:10" not in de_ese_dia
+               and "arranca a las 05:40" in sobre_ese_dia and "07:10" not in sobre_ese_dia and "arranca a las 07:10" in de_hoy
+               and "09:15" in de_hoy and "09:15" not in de_ese_dia + sobre_ese_dia
+               and de_ese_dia.startswith(f"La memoria de {carpeta} como estaba el ")
+               and str(Path(carpeta) / "historial-prueba.md") in de_ese_dia and "neuromapa-al-" not in de_ese_dia + sobre_ese_dia
+               and version and "05:40" in historial.contenido(carpeta, version.group(1), "historial-prueba.md")
+               and "Solo la memoria" in de_ese_dia and sorted(os.listdir(memoria)) == en_disco
+               and [list(f["raices"]) for f in historial.nucleo.FUENTES] == raices_antes,
+               (de_ese_dia[-900:], sobre_ese_dia[:500], de_hoy[:300]))
+        fijo = time.mktime((2026, 10, 11, 12, 0, 0, 0, 0, -1))
+        esperados = {"2026-10-06": "2026-10-06 23:59:59", "6/10": "2026-10-06 23:59:59", "6/10/26": "2026-10-06 23:59:59",
+                     "6/10 18:30": "2026-10-06 18:30:59", "2026-10-06T18:30:15": "2026-10-06 18:30:15",
+                     "25/12": "2025-12-25 23:59:59", "31/2": None, "mañana": None, "6/10 a la tarde": None, "": None}
+        entendidos = {texto: (lambda m: time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m)) if m else None)(
+            historial.momento_de(texto, fijo)) for texto in esperados}
+        probar("la fecha de --al va como 2026-10-06, 6/10 o «6/10 18:30»: sin hora es hasta el final de ese día, sin año es "
+               "la última vez que pasó ese día, y lo que no es una fecha no se acepta", entendidos == esperados, entendidos)
+        muy_antes = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(min(historial.versiones(carpeta)) - 86400))
+        codigo_antes, dicho_antes = salida_de(historial.main_al, "riego", muy_antes, True)
+        codigo_mala, dicho_mala = salida_de(historial.main_al, "riego", "mañana", True)
+        codigo_suelta, dicho_suelta = cerebro_en(t, "--al", "6/10")
+        codigo_consola, dicho_consola = cerebro_en(t, "--sobre", "riego nocturno zapallar", "--al", cuando)
+        probar("una fecha de antes del historial dice desde cuándo hay versiones; una fecha mal escrita, o --al sin --sobre "
+               "ni --buscar, lo dicen sin romperse; y por la consola responde igual",
+               codigo_antes == 1 and "empieza el" in dicho_antes and codigo_mala == 2 and "no entendí la fecha" in dicho_mala
+               and codigo_suelta == 2 and "--al va con --sobre" in dicho_suelta and codigo_consola == 0
+               and "arranca a las 05:40" in dicho_consola and "07:10" not in dicho_consola
+               and "Traceback" not in dicho_antes + dicho_mala + dicho_suelta + dicho_consola,
+               (dicho_antes, dicho_mala, dicho_suelta, dicho_consola[:500]))
     finally:
-        for ruta in (nueva, suelta, memoria / "id_rsa.md"):
+        for ruta in (nueva, suelta, memoria / "id_rsa.md", de_hoy_afuera):
             if ruta.exists():
                 ruta.unlink()
         shutil.rmtree(memoria / ".privado", ignore_errors=True)
+
+
+def revisar_vigencia(t):
+    seccion("Qué dato cambió y cuándo (--cambios y el aviso de --sobre)")
+    historial = importlib.import_module("historial")
+    vigencia = importlib.import_module("vigencia")
+    buscador = importlib.import_module("buscador")
+    if not historial.hay_git():
+        saltear("qué dato cambió y cuándo: sin git en el PATH, salteado")
+        return
+    memoria = t / "memoria"
+    carpeta = str(memoria.resolve())
+    nota = memoria / "vigencia-prueba.md"
+    archivo = memoria / "vigencia-archivo.md"
+    manguera = "La manguera vieja del invernadero se guardó en el galpón del fondo."
+
+    def cuerpo(revisada, minutos, bomba, dia, punto, litros, otras):
+        cabeza = frontmatter("vigencia-prueba", f"Riego del invernadero de prueba, revisado el {revisada} de octubre", "project")
+        return (f"{cabeza}# Invernadero de prueba\n\nEl invernadero riega los tomates durante {minutos} minutos\n"
+                f"por turno en verano. La bomba del invernadero quedó **{bomba}** después del cambio de filtro.\n"
+                f"El caudal del invernadero se midió el {dia} con el balde grande.\n"
+                f"El sensor de humedad del invernadero se limpia con un trapo seco{punto}\n"
+                f"{otras[0]}\n## Otra parte\n\nEl tractor del fondo carga {litros} litros de gasoil en el tanque.\n{otras[1]}")
+
+    def escribir(ruta, texto):
+        ruta.write_text(texto, encoding="utf-8", newline="\n")
+
+    def salida_de(funcion, *argumentos):
+        texto = io.StringIO()
+        with contextlib.redirect_stdout(texto):
+            codigo = funcion(*argumentos)
+        return codigo, texto.getvalue()
+
+    def sobre(consulta, anotar=buscador.cambios_del_historial):
+        indice = buscador.desde_disco(guardado=False)
+        return "\n".join(buscador.responder(indice, consulta, True, anotar=anotar))
+
+    def renglon_de(texto):
+        return nota.read_text(encoding="utf-8").split("\n").index(texto) + 1
+
+    try:
+        escribir(nota, cuerpo(3, 28, "SIN PROBAR", "3/10", ";", 40, (
+            manguera + "\n", "El galpón del fondo tiene una gotera sobre la mesa de trabajo.\n"
+            "Los plantines de albahaca del invernadero pasan al cantero dos.\n")))
+        historial.guardar()
+        escribir(nota, cuerpo(9, 45, "PROBADA", "9/10", ".", 60, (
+            "", "Sobre la mesa de trabajo quedó una caja del galpón del fondo.\n"
+            "Los plantines de albahaca del invernadero pasan al cantero dos (los regó Ana).\n")))
+        escribir(archivo, f"# Archivo del invernadero\n\n{manguera}\n")
+        historial.guardar()
+        datos = vigencia.cambios_de(carpeta, "vigencia-prueba.md")
+        clases = sorted((e["clase"], e["antes"].split(" ")[1]) for e in datos["eventos"])
+        mudada = next((e for e in datos["eventos"] if e["clase"] == vigencia.MUDADA), {})
+        probar("comparando dos versiones de una nota separa lo que cambió de verdad: el número, el estado, la fecha, lo "
+               "que se amplió y lo que se borró (aunque haya una frase nueva con las mismas palabras en otro orden); lo "
+               "que se mudó tal cual a otra nota va aparte, con su destino; y no cuentan un cambio de puro signo (un punto "
+               "por un punto y coma) ni el del encabezado de la nota",
+               clases == [("ampliada", "plantines"), ("borrada", "galpón"), ("estado", "bomba"), ("fecha", "caudal"),
+                          ("mudada", "manguera"), ("numero", "invernadero"), ("numero", "tractor")]
+               and mudada.get("a") == "vigencia-archivo.md" and len(datos["versiones"]) == 2, clases)
+        turno = "El turno de la {} riega el cantero uno con la manguera verde."
+        de_dos = vigencia.comparar(f"# Turnos\n\n{turno.format('mañana')}\n{turno.format('tarde')}\n",
+                                   f"# Turnos\n\n{turno.format('noche')}\n", {})
+        probar("una frase nueva es la versión nueva de una sola frase vieja: si dos se parecen a ella, la otra cuenta "
+               "como borrada", sorted(e["clase"] for e in de_dos) == ["borrada", "otras"], de_dos)
+        escribir(nota, nota.read_text(encoding="utf-8").replace("durante 45 minutos", "durante 50 minutos"))
+        historial.guardar()
+        codigo, dicho = salida_de(vigencia.main, "vigencia-prueba")
+        version = re.search(r'show ([0-9a-f]{7,})\^:"vigencia-prueba\.md"', dicho)
+        de_45 = "El invernadero riega los tomates durante 45 minutos por turno en verano."
+        probar("--cambios NOTA lo cuenta de lo más nuevo a lo más viejo: qué decía antes y qué pasó a decir, cuál sigue "
+               "así hoy, cuántas frases se mudaron y adónde (sin mostrarlas como cambio), y el comando para leer la nota "
+               "entera de antes",
+               codigo == 0 and dicho.startswith("Cambios de vigencia-prueba.md según el historial: 3 versiones de la nota")
+               and "6 frases reescritas (1 de estado, 3 de número, 1 de fecha o commit, 1 ampliada) y 1 borrada." in dicho
+               and f"antes decía:  «{de_45}»" in dicho
+               and f"pasó a decir: «{de_45.replace('45', '50')}» (así sigue hoy)" in dicho
+               and f"pasó a decir: «{de_45}»\n" in dicho and dicho.index("durante 50 minutos") < dicho.index("durante 28")
+               and "1 frase se mudó tal cual a otra nota y no cuenta como cambio: 1 a vigencia-archivo.md el " in dicho
+               and "manguera" not in dicho and "trapo seco" not in dicho
+               and "decía: «El galpón del fondo tiene una gotera sobre la mesa de trabajo.»" in dicho
+               and version and "45 minutos" in historial.contenido(carpeta, version.group(1) + "^", "vigencia-prueba.md"),
+               dicho)
+        tope = vigencia.TOPE_EVENTOS
+        vigencia.TOPE_EVENTOS = 2
+        try:
+            _, cortado = salida_de(vigencia.main, "vigencia-prueba")
+            _, entero = salida_de(vigencia.main, str(nota), True)
+        finally:
+            vigencia.TOPE_EVENTOS = tope
+        probar("muestra los últimos cambios y dice cuántos quedan; con --todo salen todos; la nota se puede pasar por su "
+               "nombre o por su ruta", "… y 5 cambios más antiguos: con --todo salen todos." in cortado
+               and "durante 50 minutos" in cortado and "SIN PROBAR" not in cortado and "SIN PROBAR" in entero
+               and "más antiguos" not in entero and "Hoy esa nota no existe" not in entero, cortado)
+        largo = " ".join(f"palabra{n}" for n in range(40))
+        recorte = vigencia.recortes(f"{largo} y al final vale 10 pesos por kilo.", f"{largo} y al final vale 20 pesos por kilo.")
+        probar("si la frase es larga y lo que cambió está al final, el recorte empieza cerca del cambio y lo muestra",
+               recorte[0].startswith("…") and "vale 10 pesos" in recorte[0] and "vale 20 pesos" in recorte[1]
+               and len(recorte[0]) <= vigencia.LARGO_CITA + 2, recorte)
+        filas = vigencia.resumen_de(carpeta, 2)
+        mia = next((f for f in filas if f[1] == "vigencia-prueba.md"), None)
+        _, lista = salida_de(vigencia.main, "")
+        probar("--cambios sin nota dice qué notas cambiaron en los últimos días y cuánto; en un plazo sin cambios lo dice",
+               mia is not None and mia[2:] == (6, 1)
+               and "vigencia-prueba.md: 6 frases reescritas y 1 borrada; lo último, el " in lista
+               and "--cambios NOTA" in lista and vigencia.resumen_de(carpeta, 2, time.time() + 30 * 86400) == []
+               and "Ningún dato" in vigencia.texto_resumen(carpeta, 2, [])[0], (filas, lista))
+        de_50 = "El invernadero riega los tomates durante 50 minutos"
+        con_aviso = sobre("invernadero riega tomates")
+        aviso = f"(línea {renglon_de(de_50)}); antes decía: «{de_45}»"
+        sin_aviso = sobre("invernadero riega tomates", None)
+        del_motor = buscador.desde_disco(guardado=False).sobre("invernadero riega tomates", buscador.ALCANCE)
+        codigo_sobre, por_consola = cerebro_en(t, "--sobre", "invernadero riega tomates")
+        probar("--sobre avisa debajo de lo que manda a leer si el renglón citado cambió: cuándo, en qué línea y qué decía "
+               "antes; solo por la consola (el resultado del buscador, que es lo que usan la pista automática y la app, "
+               "no lo trae) y sin avisar de lo que cambió en renglones que la consulta no cita",
+               "cambió el " in con_aviso and aviso in con_aviso and "antes decía" not in sin_aviso
+               and not any("cambios" in p for p in del_motor["leerPrimero"])
+               and "40 litros" not in con_aviso and "SIN PROBAR" not in con_aviso
+               and codigo_sobre == 0 and aviso in por_consola, (con_aviso[-900:], por_consola[-500:]))
+        de_estado = sobre("bomba invernadero filtro")
+        de_fecha = sobre("caudal invernadero balde")
+        de_ampliada = sobre("plantines albahaca cantero")
+        probar("avisa cuando cambió el estado, un número o las palabras; no cuando solo cambió una fecha o se le agregó "
+               "algo al final",
+               "antes decía: «La bomba del invernadero quedó SIN PROBAR después del cambio de filtro.»" in de_estado
+               and "antes decía" not in de_fecha and "antes decía" not in de_ampliada
+               and "vigencia-prueba.md" in de_fecha and "vigencia-prueba.md" in de_ampliada,
+               (de_estado[-500:], de_fecha[-400:], de_ampliada[-400:]))
+        por_tramo, presupuesto = vigencia.CAMBIOS_POR_TRAMO, vigencia.PRESUPUESTO_AVISO
+        try:
+            dos = sobre("invernadero")
+            vigencia.CAMBIOS_POR_TRAMO = 1
+            uno = sobre("invernadero")
+            vigencia.CAMBIOS_POR_TRAMO, vigencia.PRESUPUESTO_AVISO = por_tramo, 0
+            sin_tiempo = sobre("invernadero riega tomates")
+        finally:
+            vigencia.CAMBIOS_POR_TRAMO, vigencia.PRESUPUESTO_AVISO = por_tramo, presupuesto
+        probar("el aviso tiene tope: dos cambios por tramo, primero el más nuevo, y un tope de tiempo (sin tiempo, --sobre "
+               "responde igual, sin el aviso)", dos.count("antes decía") == 2 and uno.count("antes decía") == 1
+               and aviso in uno and "antes decía" not in sin_tiempo and "vigencia-prueba.md" in sin_tiempo,
+               (dos[-700:], uno[-400:]))
+        guardada = nota.read_text(encoding="utf-8")
+        escribir(nota, guardada.replace("durante 50 minutos", "durante 55 minutos"))
+        sin_guardar = sobre("invernadero riega tomates")
+        escribir(nota, guardada)
+        probar("si el renglón volvió a cambiar y eso todavía no está en el historial, no avisa con un «antes» que ya no "
+               "es el de ese texto", "durante 45 minutos" not in sin_guardar and "vigencia-prueba.md" in sin_guardar,
+               sin_guardar[-600:])
+        archivo.unlink()
+        historial.guardar()
+        codigo_borrada, de_borrada = salida_de(vigencia.main, "vigencia-archivo")
+        codigo_mala, de_mala = salida_de(vigencia.main, "nota-que-nunca-existio")
+        codigo_consola, por_consola = cerebro_en(t, "--cambios", "vigencia-prueba.md")
+        codigo_lista, lista_consola = cerebro_en(t, "--cambios", "3")
+        probar("una nota que ya se borró se puede consultar igual (dice qué decía); una que nunca existió lo dice sin "
+               "romperse; y por la consola responde lo mismo, con una nota o con una cantidad de días",
+               codigo_borrada == 0 and f"decía: «{manguera}»" in de_borrada and "Hoy esa nota no existe." in de_borrada
+               and codigo_mala == 2
+               and "no encontré la nota" in de_mala and codigo_consola == 0 and "pasó a decir" in por_consola
+               and codigo_lista == 0 and "en los últimos 3 días" in lista_consola
+               and "Traceback" not in de_borrada + de_mala + por_consola + lista_consola,
+               (de_borrada, de_mala, por_consola[:300], lista_consola[:300]))
+    finally:
+        for ruta in (nota, archivo):
+            if ruta.exists():
+                ruta.unlink()
 
 
 def revisar_buscar_charlas(t):
@@ -4950,6 +6491,12 @@ def revisar_plugin(t):
                for evento, grupos in hooks["hooks"].items()}
     probar("el recordatorio de guardar corre al volver de compactar y al terminar cada respuesta, y en nada más",
            {k: v for k, v in guardar.items() if v} == {"SessionStart": ["compact"], "Stop": [""]}, guardar)
+    de_reglas = hooks["hooks"].get("InstructionsLoaded", [])
+    probar("el hook de las reglas cargadas corre solo cuando una regla entra por su carpeta (no en cada instrucción que se "
+           "carga al empezar un chat)",
+           [g.get("matcher") for g in de_reglas] == ["path_glob_match"]
+           and all("hook_cerebro.py" in h["command"] and h.get("async") is True for g in de_reglas for h in g["hooks"]),
+           de_reglas)
     de_windows = sorted({p for patron in ("*.bat", "*.cmd", "bin/*.cmd", "scripts/*.cmd") for p in CARPETA.glob(patron)})
     con_lf = [p.name for p in de_windows
               if p.read_bytes().count(b"\n") != p.read_bytes().count(b"\r\n") or max(p.read_bytes()) > 127]
@@ -5059,6 +6606,14 @@ def revisar_aprender(t):
     probar("no aprende archivos de librerías de terceros ni generados (node_modules, .git, __pycache__, .next, entornos "
            "de Python); los datos en bin sí", not any(aprender.util(r) for r in ajenos)
            and aprender.util("d:/x/servidor/bin/debug/datos/ajustes.ini"), [r for r in ajenos if aprender.util(r)])
+    temporales = ["d:/x/scripts/.leer-pruebas.tmp.cjs", "d:/x/datos.json.tmp", "d:/x/datos.json.tmp4821",
+                  "d:/x/informe.temp.txt", "d:/x/~$informe.docx", "d:/x/nota.md.swp", "d:/x/archivo.py~"]
+    parecidos = ["d:/x/plantilla.tmpl", "d:/x/temperatura.py", "d:/x/tmp.py", "d:/x/templates/base.html",
+                 "d:/x/attempt.cs", "d:/x/sistema.temperature.json"]
+    probar("no aprende archivos temporales (.tmp o .temp en el nombre, ~$ de Office, .swp de vim, los que terminan en "
+           "~), y sí los nombres comunes parecidos (antes aprendía, por ejemplo, un .tmp.cjs de pruebas)",
+           not any(aprender.util(r) for r in temporales) and all(aprender.util(r) for r in parecidos),
+           [r for r in temporales if aprender.util(r)] + [r for r in parecidos if not aprender.util(r)])
     probar("una sola lista de archivos delicados, más completa (claves de SSH y PuTTY, .npmrc, .netrc, .git-credentials, "
            ".kube, terraform, KeePass, tokens, contraseñas de Chrome, la clave del mapa): lo aprendido y el buscador dejan "
            "afuera lo mismo, y los nombres comunes parecidos no",
@@ -5689,6 +7244,82 @@ def revisar_aprendido_en_el_aviso(t):
            and lejos("d:/juego", "d:/neuromapa") and lejos("d:/neuromapa", "d:/otro")
            and not lejos("d:/juego", "d:/otro") and not lejos("d:/docs", "d:/neuromapa") and not lejos("d:/juego", "d:/juego"),
            secciones)
+    varios = ("# Memoria\n## Juego: servidor\n- [a](a.md) — x\n- Historias (archivo): [1](a-historia-1.md) uno; "
+              "[2](<a-historia-2.md>) dos\n## Sueltas\n- [b](b.md) — y\n")
+    notas = [{"id": "i", "tipo": "indice", "ruta": "C:/m/MEMORY.md", "_cuerpo": varios},
+             {"id": "ajena", "tipo": "project", "ruta": "C:/otra/a-historia-1.md", "_cuerpo": "nada"}]
+    notas += [{"id": n, "tipo": "project", "ruta": f"C:/m/{n}.md", "_cuerpo": "nada"}
+              for n in ("a", "a-historia-1", "a-historia-2", "b")]
+    memoria_falsa = types.SimpleNamespace(
+        nodos=notas, fuente_de={n["id"]: {"memoria": True} for n in notas}, por_id={n["id"]: n for n in notas},
+        ganchos={"a": ("i", "x", varios.index("[a]")), "b": ("i", "y", varios.index("[b]"))})
+    conocidos = buscador.proyectos_conocidos
+    buscador.proyectos_conocidos = lambda: lista
+    try:
+        de_notas = buscador.proyectos_de_notas(memoria_falsa)
+    finally:
+        buscador.proyectos_conocidos = conocidos
+    probar("una memoria que el índice nombra en un renglón con varias notas («Historias: [1](…); [2](…)») toma el proyecto "
+           "de esa sección (antes quedaba sin proyecto); una de otra carpeta con el mismo nombre, no",
+           de_notas.get("a") == de_notas.get("a-historia-1") == de_notas.get("a-historia-2") == "d:/juego"
+           and de_notas.get("b") == "" and "ajena" not in de_notas and "i" not in de_notas, de_notas)
+    reales = buscador.proyectos_conocidos()
+    marcado = next(r for r, p in reales if p.get("alias") == "demo")
+    surtido = ("# Memoria\n## Juego: servidor\n- [a](a.md) — x\n- [regla-juego](regla-juego.md) — r\n## Sueltas\n"
+               "- [b](b.md) — y\n- [c](c.md) — cita\n- [c-historia-1](c-historia-1.md) — viejo\n- [regla](regla.md) — r\n"
+               "- [marcada](marcada.md) — z\n")
+    tipos = {"a": "project", "regla-juego": "feedback", "b": "project", "c": "project", "c-historia-1": "project",
+             "regla": "feedback", "marcada": "project"}
+    notas = [{"id": "i", "tipo": "indice", "ruta": "C:/m/MEMORY.md", "titulo": "Memoria", "_cuerpo": surtido}]
+    notas += [{"id": n, "tipo": tipo, "ruta": f"C:/m/{n}.md", "_cuerpo": "nada",
+               "titulo": "Proyecto demo: el plan" if n == "marcada" else n} for n, tipo in tipos.items()]
+    notas += [{"id": "doc", "tipo": "doc", "ruta": "D:/docs/guia.md", "titulo": "Guía", "_cuerpo": "nada"},
+              {"id": "suelto", "tipo": "doc", "ruta": "E:/lejos/nota.md", "titulo": "Lejos", "_cuerpo": "nada"}]
+    citas = {"archivos": [{"valor": f"x{k}.py", "proyecto": "otro", "notas": [["c", 1], ["a", 1]]} for k in range(3)]
+             + [{"valor": f"y{k}.py", "proyecto": "juego", "notas": [["regla", 1], ["b", 1]]} for k in range(2)],
+             "commits": [{"valor": "abc1234", "repo": "juego", "notas": [["regla", 2]]}]}
+
+    def mundo(proyecto_de_la_memoria, quitar=()):
+        vivas = [n for n in notas if n["id"] not in quitar]
+        return types.SimpleNamespace(
+            nodos=vivas, por_id={n["id"]: n for n in vivas}, ganchos={}, entidades=citas,
+            fuente_de={n["id"]: {"memoria": n["tipo"] != "doc", "id": "m", "proyecto": proyecto_de_la_memoria} for n in vivas})
+
+    buscador.proyectos_conocidos = lambda: [("d:/juego", {"alias": "juego", "nombre": "El juego"}),
+                                            ("d:/docs", {"alias": "docs", "color": "#123456"}), ("d:/otro", {"alias": "otro"}),
+                                            ("d:/neuromapa", {"aparte": True})] + [(r, p) for r, p in reales if r == marcado]
+    try:
+        de_cada = buscador.proyecto_de_cada_nota(mundo(""))
+        de_compartida = buscador.proyecto_de_cada_nota(mundo("D:\\otro"))
+        de_una = buscador.proyecto_de_cada_nota(mundo("D:\\otro", quitar=("a", "regla-juego", "marcada")))
+        de_nodo, grupos_p = buscador.grupos_de_proyecto(mundo(""))
+        para_la_pista = buscador.proyectos_de_notas(mundo(""))
+    finally:
+        buscador.proyectos_conocidos = conocidos
+    probar("la pista sigue como estaba: las reglas no entran en su cuenta de proyectos, ni toman el de su sección",
+           "regla" not in para_la_pista and "regla-juego" not in para_la_pista and para_la_pista.get("a") == "d:/juego"
+           and para_la_pista.get("c") == "", para_la_pista)
+    probar("en una memoria que reparte sus notas entre varios proyectos, lo que queda sin decidir no se le regala al "
+           "proyecto de la carpeta", de_compartida == de_cada, de_compartida)
+    probar("para el mapa, cada memoria toma su proyecto en este orden: el que nombra su título, el de su sección del índice "
+           "(también las reglas), el de los archivos y commits que cita, el de su nota madre; una regla sin proyecto va "
+           "a «Cómo trabajar» aunque cite código, y lo demás queda sin proyecto",
+           de_cada == {"i": "", "a": "d:/juego", "regla-juego": "d:/juego", "b": "", "c": "d:/otro",
+                       "c-historia-1": "d:/otro", "regla": buscador.REGLAS, "marcada": marcado, "doc": "d:/docs",
+                       "suelto": ""}, de_cada)
+    probar("si la memoria es de un solo proyecto (no reparte sus notas entre varios), lo que queda sin decidir, el índice "
+           "y las reglas incluidos, es de ese proyecto",
+           de_una == {"i": "d:/otro", "b": "d:/otro", "c": "d:/otro", "c-historia-1": "d:/otro", "regla": "d:/otro",
+                      "doc": "d:/docs", "suelto": ""}, de_una)
+    probar("los grupos de proyecto que van a la página llevan el nombre del config (o el alias), un color fijo por orden si "
+           "no se le dio uno, cuántas notas tienen, y no aparecen los que quedaron vacíos",
+           [(g["id"], g["nombre"], g["color"], g["cantidad"]) for g in grupos_p] == [
+               ("juego", "El juego", buscador.COLORES_DE_PROYECTO[0], 2), ("docs", "docs", "#123456", 1),
+               ("otro", "otro", buscador.COLORES_DE_PROYECTO[2], 2), ("demo", "demo", buscador.COLORES_DE_PROYECTO[0], 1),
+               (buscador.REGLAS, "Cómo trabajar", buscador.COLOR_REGLAS, 1),
+               (buscador.NINGUNO, "Sin proyecto", buscador.COLOR_NINGUNO, 3)]
+           and de_nodo["regla"] == buscador.REGLAS and de_nodo["suelto"] == buscador.NINGUNO and de_nodo["a"] == "juego",
+           grupos_p)
     import cerebro as nucleo
     import consultas
     viejos = nucleo.DATOS
@@ -5956,6 +7587,14 @@ def main():
             paso("el aviso al editar código", revisar_recuerdo, t)
             paso("recordar guardar", revisar_guardar, t)
             paso("historial de la memoria", revisar_historial, t)
+            paso("qué dato cambió y cuándo", revisar_vigencia, t)
+            paso("ordenar una nota larga", revisar_ordenar, t)
+            paso("cambiarle el nombre a una nota", revisar_renombrar, t)
+            paso("partir sola la memoria casi llena", revisar_partir_sola, t)
+            paso("partir sola aunque no haya nada viejo", revisar_partir_siempre, t)
+            paso("tablero de pendientes", revisar_pendientes, t)
+            paso("reglas por carpeta", revisar_reglas, t)
+            paso("recetas que pueden ser skills", revisar_recetas, t)
             paso("buscar en las charlas viejas", revisar_buscar_charlas, t)
             paso("ver y olvidar lo aprendido", revisar_olvidar, t)
             paso("el gasto y el freno de mano", revisar_gasto, t)

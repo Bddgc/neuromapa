@@ -28,6 +28,8 @@ AVISO_BYTES_INDICE = 18750
 DESCRIPCION_MINIMA = 30
 LARGO_CITA = 120
 TIPOS_MEMORIA = {"user", "feedback", "project", "reference"}
+RE_NOMBRE_DE_ARCHIVO = re.compile(r"[-_.](?:historia|history|archivo|archive|archived)[-_.]?\d+$", re.I)
+RE_ENLACE_A_NOTA = re.compile(r"\[[^\]\n]*\]\(\s*<?(?:\./)?([^)>#\s]+\.md)[)#>\s]", re.I)
 PRIORIDAD_GRUPO = {f["id"]: f["prioridad"] for f in nucleo.FUENTES if "prioridad" in f}
 
 RE_BACKTICK = re.compile(r"`([^`\n]{1,300})`")
@@ -35,6 +37,12 @@ RE_HASH = re.compile(r"^([0-9a-f]{7,40})(?:\.\.\.?([0-9a-f]{7,40}))?$")
 RE_CONTEXTO_SESION = re.compile(r"sesi[oó]n|session|uuid|chat|conversaci", re.I)
 RE_CONTEXTO_HUELLA = re.compile(r"\b(?:sha\d*(?:sum)?|md5|crc\d*|hash|huellas?|checksum|blake\d*|xxh\d*)\b|suma de control", re.I)
 RE_HASH_CORTADO = re.compile(r"^([0-9a-f]{7,40})(?:…|\.\.\.)?$", re.I)
+RE_SIGUE_LISTA = re.compile(r" ?(?:[,/+]|(?:y|e|o|u|ni|and|or)\b)[^;()]*$", re.I)
+RE_FIN_DE_ORACION = re.compile(r"[.!?](?: |$)")
+RE_PALABRA_COMMIT = re.compile(r"commit|merge|\brama\b|branch|cherry|revert", re.I)
+RE_ITEM_DE_LISTA = re.compile(r"\n[ \t]*(?:[-*+]|\d+[.)])[ \t]")
+LARGO_ENTRE_HUELLAS = 60
+HUELLA_CERCA = 200
 RE_UNIDAD = re.compile(r"(?<!\w)[A-Za-z]:[\\/]")
 PROHIBIDOS_EN_RUTA = set("`*<>|\"?:()\n")
 RE_YA_NO_ESTA = re.compile(r"\bborrad[oa]s?\b|\bse\s+borr[oó]\b|\bno\s+existen?\b|\belimin|\bya\s+no\s+est|\bse\s+sac[oó]\b"
@@ -193,15 +201,38 @@ def es_huella(texto, inicio, desde):
     return bool(RE_CONTEXTO_HUELLA.search(antes)) and not re.search(r"commit", antes, re.I)
 
 
+def sigue_la_lista(entre):
+    if "\n\n" in entre or RE_ITEM_DE_LISTA.search(entre):
+        return False
+    plano = re.sub(r"\s+", " ", entre)
+    return (len(plano) <= LARGO_ENTRE_HUELLAS and bool(RE_SIGUE_LISTA.match(plano))
+            and not RE_FIN_DE_ORACION.search(plano) and not RE_PALABRA_COMMIT.search(plano))
+
+
 def huellas_de(texto):
     salida = set()
     anterior = 0
+    fin_de_huella = None
     for m in RE_BACKTICK.finditer(texto):
         desde, anterior = anterior, m.end()
         h = RE_HASH_CORTADO.match(m.group(1).strip())
-        if h and es_huella(texto, m.start(), desde):
+        en_lista = fin_de_huella == desde and sigue_la_lista(texto[desde:m.start()])
+        if h and (en_lista or es_huella(texto, m.start(), desde)):
             salida.add(h.group(1).lower())
+            fin_de_huella = m.end()
+        else:
+            fin_de_huella = None
     return salida
+
+
+def huella_cerca(texto, inicio):
+    parrafo = texto.rfind("\n\n", 0, inicio)
+    antes = texto[max(parrafo + 2 if parrafo >= 0 else 0, inicio - HUELLA_CERCA):inicio]
+    items = list(RE_ITEM_DE_LISTA.finditer(antes))
+    if items:
+        antes = antes[items[-1].end():]
+    nombradas = list(RE_CONTEXTO_HUELLA.finditer(antes))
+    return bool(nombradas) and not RE_PALABRA_COMMIT.search(antes[nombradas[-1].end():])
 
 
 def extraer_commits(texto):
@@ -595,6 +626,14 @@ def regla_commits(cerebro, repos=None):
         if RE_NEGADO.search(nodo["_cuerpo"][max(0, inicio - 8):inicio]):
             continue
         vistos.add((nodo["id"], valor))
+        if huella_cerca(nodo["_cuerpo"], inicio):
+            salida.append(hallazgo(
+                "huellaProbable", nodo["id"], linea_en(nodo, inicio), "revisar",
+                f"Cita {valor}, que no es un commit de ningún repo conocido ({nombres}); un poco antes se habla de una "
+                "huella, así que parece la huella de un archivo y no un commit.",
+                "Si es una huella, decirlo al lado («huella», «sha256»). Si era un commit, buscar el hash correcto con "
+                "git log."))
+            continue
         salida.append(hallazgo(
             "commitInexistente", nodo["id"], linea_en(nodo, inicio), "aviso",
             f"Cita el commit {valor}, que no está en ningún repo conocido ({nombres}).",
@@ -609,6 +648,19 @@ def regla_tamano(cerebro):
         tokens = int(nodo["bytes"] / BYTES_POR_TOKEN)
         lineas = nodo["lineas"]
         if lineas <= LINEAS_READ and tokens <= TOKENS_READ:
+            lleno = max(lineas / LINEAS_READ, tokens / TOKENS_READ)
+            sola = nucleo.CONFIG.get("partir_sola")
+            if (lleno * 100 >= (sola or configuracion.PARTIR_SOLA)["desde"] and nodo["tipo"] != "indice"
+                    and cerebro.fuente_de[nodo["id"]].get("memoria") and not nucleo.es_archivo(nodo)):
+                salida.append(hallazgo(
+                    "casiLlena", nodo["id"], 1, "revisar",
+                    f"Es una memoria y está al {int(lleno * 100)} % del tope de un Read (~{miles(tokens)} de "
+                    f"{miles(TOKENS_READ)} tokens): si sigue creciendo, Read va a mostrar solo el principio.",
+                    (f"La pasada de cada día la parte sola y lo avisa ({configuracion.comando()} --partir-llenas lo hace "
+                     "ahora): las entradas viejas van a una nota de historia y, si no tiene, la segunda mitad a una "
+                     "«parte 2». A mano: " if sola else "")
+                    + f'{configuracion.comando()} --partir "{Path(nodo["ruta"]).name}" lista sus piezas y arma el cambio '
+                    "sin perder un renglón."))
             continue
         motivos = []
         if lineas > LINEAS_READ:
@@ -620,7 +672,9 @@ def regla_tamano(cerebro):
                 "noEntraEnRead", nodo["id"], 1, "aviso",
                 f'Es una memoria y no entra en un Read: {" y ".join(motivos)}. Read muestra solo el principio y avisa '
                 "que la vista es parcial, así que lo último que se agregó no se ve de una.",
-                f"Pasar lo viejo a notas de archivo y dejar en esta solo lo vigente (lo decide {QUIEN})."))
+                f"Pasar lo viejo a notas de archivo y dejar en esta solo lo vigente (lo decide {QUIEN}). "
+                f'{configuracion.comando()} --partir "{Path(nodo["ruta"]).name}" lista sus piezas y arma el cambio sin '
+                "perder un renglón."))
         else:
             salida.append(hallazgo(
                 "noEntraEnRead", nodo["id"], 1, "info",
@@ -704,8 +758,27 @@ def es_floja(descripcion, nodo):
     return d.replace("-", " ") in nombres
 
 
+def listadas_como_archivo(cerebro):
+    salida = {}
+    for indice in cerebro.nodos:
+        if indice["tipo"] != "indice":
+            continue
+        carpeta = str(Path(indice["ruta"]).parent)
+        for renglon in indice["_cuerpo"].split("\n"):
+            enlaces = list(RE_ENLACE_A_NOTA.finditer(renglon))
+            if len(enlaces) < 2 or not nucleo.RE_ARCHIVO.search(renglon[:enlaces[0].start()]):
+                continue
+            for m in enlaces:
+                destino = os.path.normpath(os.path.join(carpeta, urllib.parse.unquote(m.group(1))))
+                identificador = cerebro.por_ruta.get(nucleo.normalizar(destino))
+                if identificador:
+                    salida.setdefault(identificador, Path(indice["ruta"]).name)
+    return salida
+
+
 def regla_frontmatter(cerebro):
     salida = []
+    de_archivo = listadas_como_archivo(cerebro)
     for nodo in cerebro.nodos:
         if not cerebro.fuente_de[nodo["id"]].get("memoria") or nodo["tipo"] == "indice":
             continue
@@ -742,6 +815,15 @@ def regla_frontmatter(cerebro):
             salida.append(hallazgo("descripcionFloja", nodo["id"], linea_de_clave(nodo, "description"), "revisar",
                                    f"La description ({citar(descripcion, 60)}) casi no dice nada.",
                                    "Escribir en una frase qué hay adentro y cuándo conviene abrirla."))
+        if not nucleo.es_archivo(nodo):
+            motivo = (f'{de_archivo[nodo["id"]]} la lista en un renglón que dice «(archivo)»' if nodo["id"] in de_archivo
+                      else "por cómo se llama" if RE_NOMBRE_DE_ARCHIVO.search(Path(nodo["ruta"]).stem) else "")
+            if motivo:
+                salida.append(hallazgo("archivoSinMarca", nodo["id"], linea_de_clave(nodo, "description"), "revisar",
+                                       f"Parece una nota de archivo ({motivo}), pero ni su título ni su description lo "
+                                       "dicen: en las recomendaciones compite con las notas vigentes como una más.",
+                                       "Si guarda cosas viejas, empezar la description con «(archivo)». Si sigue vigente, "
+                                       "no hace falta nada."))
     for identificador, (indice, gancho, _) in cerebro.ganchos.items():
         nodo = cerebro.por_id.get(identificador)
         if nodo is None or not cerebro.fuente_de[identificador].get("memoria"):

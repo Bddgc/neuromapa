@@ -141,7 +141,8 @@ claude plugin marketplace remove neuromapa
 
 Se borra su carpeta de datos, salvo que hayas elegido una propia en `carpeta_datos` o que desinstales con
 `--keep-data`. Tus notas no se tocan: Neuromapa
-nunca escribe en la memoria. Cuando encuentra un problema se lo cuenta a Claude, y es Claude quien puede arreglarlo.
+no escribe en la memoria por su cuenta. Cuando encuentra un problema se lo cuenta a Claude, y es Claude quien puede
+arreglarlo.
 
 ## Privacidad
 
@@ -156,7 +157,21 @@ nunca escribe en la memoria. Cuando encuentra un problema se lo cuenta a Claude,
   prendés, corre tu `claude`. `herramientas/bajar_librerias.py` baja d3 y marked de `cdn.jsdelivr.net`, pero es para
   quien mantiene el proyecto: ningún hook lo corre. El código de `demo/` es de proyectos inventados y no se ejecuta.
 - **Solo cambia una nota si lo aprobás:** el repaso de la noche propone arreglos y `--aplicar` cambia solo los que
-  elijas. Fuera de eso, Neuromapa no escribe en tus notas.
+  elijas. `--partir` (pasar lo viejo de una nota larga a otra nota) y `--renombrar` (cambiarle el nombre a una nota y
+  a lo que la nombra en la memoria) muestran primero el plan y lo hacen recién con el código de ese plan
+  (`--confirmar`); antes copian las notas como estaban a `respaldos/`, dentro de la carpeta de datos. Fuera de eso,
+  Neuromapa no escribe en tus notas. La única excepción la prendés vos: con `partir_sola` en el `config.json`, la
+  pasada de cada día parte sola la memoria que está por llenarse: pasa sus entradas más viejas a una nota de historia
+  o, si no tiene fechas, su segunda mitad a una nota «parte 2». Lo hace con la misma copia de antes y sin perder un
+  renglón, lo anota en `respaldos/partidas.log` y se lo avisa a Claude. Si la nota se estaba editando, vuelve a probar
+  a la media hora con un proceso de fondo del mismo Python (ver [cómo funciona](docs/como-funciona.md)). Viene
+  apagado.
+- **Reglas y skills, solo si las confirmás:** `--reglas` y `--recetas` proponen pasar una memoria a regla por carpeta
+  o una receta a skill, y solo leen. `--regla` y `--receta` muestran el texto y, recién con el código de ese texto
+  (`--confirmar`), escriben un archivo fuera de la memoria: en `.claude/rules/` o `.claude/skills/` del proyecto (o en
+  tu carpeta personal de skills, si la nota no es de ningún proyecto). Ese archivo copia texto de tu memoria a la
+  carpeta del proyecto: si el proyecto se sube a un repositorio y `.claude/` no está ignorada, viaja con él. No pisan
+  un archivo que no hayan escrito ellos.
 - **Dormir con Claude, solo si lo prendés** (`dormir_con_claude` en el `config.json`): la pasada de cada día le manda a
   Claude, con tu propio Claude Code, renglones de tus notas y los cambios de algunos commits (nunca los de archivos
   sensibles), igual que en cualquier charla, y gasta de tu cuenta hasta el tope que pongas por día.
@@ -168,8 +183,10 @@ nunca escribe en la memoria. Cuando encuentra un problema se lo cuenta a Claude,
   índice y tapa lo que parece una clave antes de mostrarlo. Claude Code borra las charlas de la terminal a los 30 días
   (`cleanupPeriodDays`); las de la app de escritorio las guarda siempre.
 - **El registro en vivo guarda rutas, tipos de herramienta y cantidades**, nunca el texto de tus mensajes, los comandos
-  que corre Claude, lo que busca ni direcciones web completas. Lo de más de 90 días se borra solo (queda un resumen por
-  día); se cambia con `borrar_registros_dias` en el `config.json`, y 0 es nunca.
+  que corre Claude, lo que busca ni direcciones web completas. Cuando Claude Code carga una regla por carpeta, anota
+  cuál regla fue (su ruta), para que `--reglas` cuente cuánto se usa: nunca su texto ni el archivo que la hizo cargar.
+  Lo de más de 90 días se borra solo (queda un resumen por día); se cambia con `borrar_registros_dias` en el
+  `config.json`, y 0 es nunca.
 - **Lo aprendido son rutas y números** (`en-vivo/aprendido.json`, sacado de ese registro): qué archivos se usaron juntos
   y qué notas recomendadas se leyeron. Se apaga con `"aprender": false` en el `config.json`.
 - **La página (`cerebro.html`) lleva adentro el texto de tus notas**, aun en modo anónimo: no la compartas. Para mostrar
@@ -179,7 +196,9 @@ nunca escribe en la memoria. Cuando encuentra un problema se lo cuenta a Claude,
   lo que se borre se pierda. Queda en tu PC, nace cerrado para tu cuenta y, como la página, no se comparte. No guarda
   los archivos delicados por el nombre (`.env`, `id_rsa`, `.ssh/`…) ni las carpetas ocultas. Lo que entra queda en las
   versiones viejas: si alguna vez anotaste algo que no tendría que estar, borrá la carpeta `historial/` y vuelve a
-  empezar desde ahí.
+  empezar desde ahí. `--sobre` y `--buscar` con `--al FECHA` responden con la memoria como estaba ese día: para eso
+  copian esa versión a la carpeta temporal de tu cuenta y la borran al terminar. `--cambios` y el aviso «cambió el…»
+  de `--sobre` solo leen ese historial para comparar versiones: no guardan nada.
 - Lo que Claude lee de Neuromapa va a Anthropic como cualquier archivo que Claude abre.
 - **La carpeta de datos tiene que ser solo tuya**, no una compartida ni la raíz de un disco que usan otras cuentas de la
   PC: quien pueda escribir ahí puede cambiar lo que Neuromapa le pasa a Claude. Las carpetas que crea Neuromapa nacen
@@ -207,8 +226,8 @@ y Claude no recibe los avisos ni el contexto automático. Para eso, instalá el 
 
 Versión 0.1, en prueba. Probado en Windows y en Linux; en Mac todavía no. La [wiki](https://github.com/lumiel777/neuromapa/wiki)
 tiene la guía paso a paso, las preguntas frecuentes y los problemas más comunes con su solución. Si te invitaron a
-probarlo, seguí [docs/probar.md](docs/probar.md). Si algo falla, abrí un issue; si es de seguridad, mirá
-[SECURITY.md](SECURITY.md).
+probarlo, seguí [docs/probar.md](docs/probar.md). Si usás Obsidian, [docs/obsidian.md](docs/obsidian.md) cuenta cómo
+usarlos juntos. Si algo falla, abrí un issue; si es de seguridad, mirá [SECURITY.md](SECURITY.md).
 Para colaborar, [CONTRIBUTING.md](CONTRIBUTING.md); los cambios de cada versión, en [CHANGELOG.md](CHANGELOG.md).
 
 ## Licencia

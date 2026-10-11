@@ -271,7 +271,9 @@ def dormido(prompt, cwd="", sesion=""):
     if not en_su_lugar(nucleo, cwd):
         return None
     dormir.despertar(str(nucleo.DATOS), str(nucleo.CARPETA / "cerebro.py"))
-    return dormir.aviso(str(nucleo.DATOS), str(sesion)[:8], nucleo.configuracion.comando(), nucleo.CONFIG["usuario"])
+    avisos = [dormir.aviso_partidas(str(nucleo.DATOS), str(sesion)[:8]),
+              dormir.aviso(str(nucleo.DATOS), str(sesion)[:8], nucleo.configuracion.comando(), nucleo.CONFIG["usuario"])]
+    return "\n\n".join(a for a in avisos if a) or None
 
 
 def separador(ruta):

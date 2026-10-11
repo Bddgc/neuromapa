@@ -143,7 +143,7 @@ claude plugin marketplace remove neuromapa
 
 Its data folder is deleted, unless you chose your own in `carpeta_datos` or uninstall with `--keep-data`. Your notes
 are untouched: Neuromapa never
-writes to the memory. When it finds a problem it tells Claude, and it's Claude who may fix it.
+writes to the memory on its own. When it finds a problem it tells Claude, and it's Claude who may fix it.
 
 ## Privacy
 
@@ -158,7 +158,21 @@ writes to the memory. When it finds a problem it tells Claude, and it's Claude w
   `claude`. `herramientas/bajar_librerias.py` downloads d3 and marked from `cdn.jsdelivr.net`, but it is for whoever
   maintains the project: no hook runs it. The code in `demo/` belongs to made-up projects and is never run.
 - **It only changes a note if you approve it:** the nightly pass proposes fixes and `--aplicar` changes only the ones
-  you pick. Other than that, Neuromapa doesn't write to your notes.
+  you pick. `--partir` (move the old part of a long note into another note) and `--renombrar` (rename a note and
+  whatever names it in the memory) first show the plan and only do it with that plan's code (`--confirmar`); before
+  that they copy the notes as they were to `respaldos/`, inside the data folder. Other than that, Neuromapa doesn't
+  write to your notes. The one exception is something you turn on: with `partir_sola` in `config.json`, the daily pass
+  splits a memory that is about to fill up by itself: it moves its oldest entries into a history note or, if it has no
+  dates, its second half into a "part 2" note. It does so with the same backup and without losing a line, logs it in
+  `respaldos/partidas.log` and tells Claude about it. If the note was being edited, it tries again half an hour later
+  with a background process of the same Python (see [how it works](docs/como-funciona.md), in Spanish). It is off by
+  default.
+- **Rules and skills, only if you confirm them:** `--reglas` and `--recetas` suggest turning a memory into a
+  path-scoped rule or a recipe into a skill, and are read-only. `--regla` and `--receta` show the text and, only with
+  that text's code (`--confirmar`), write one file outside the memory: in the project's `.claude/rules/` or
+  `.claude/skills/` (or in your personal skills folder, if the note belongs to no project). That file copies text from
+  your memory into the project folder: if the project is pushed to a repository and `.claude/` is not ignored, it
+  travels with it. They never overwrite a file they didn't write.
 - **Sleeping with Claude, only if you turn it on** (`dormir_con_claude` in `config.json`): the daily pass sends Claude,
   through your own Claude Code, lines from your notes and the changes of some commits (never those of sensitive files),
   just like any chat, and spends from your account up to the daily cap you set.
@@ -170,8 +184,10 @@ writes to the memory. When it finds a problem it tells Claude, and it's Claude w
   looks like a key before showing it. Claude Code deletes terminal chats after 30 days (`cleanupPeriodDays`); it keeps
   desktop app chats forever.
 - **The live log keeps paths, tool types and counts**, never the text of your messages, the commands Claude runs, what
-  it searches for, or full web addresses. Anything older than 90 days is deleted on its own (a per-day summary stays);
-  change it with `borrar_registros_dias` in `config.json`, where 0 means never.
+  it searches for, or full web addresses. When Claude Code loads a path-scoped rule, it notes which rule it was (its
+  path), so `--reglas` can count how much it is used: never its text or the file that made it load. Anything older
+  than 90 days is deleted on its own (a per-day summary stays); change it with `borrar_registros_dias` in
+  `config.json`, where 0 means never.
 - **What it learns is paths and numbers** (`en-vivo/aprendido.json`, drawn from that log): which files were used
   together and which recommended notes were read. Turn it off with `"aprender": false` in `config.json`.
 - **The page (`cerebro.html`) contains the text of your notes**, even in anonymous mode: don't share it. To show the
@@ -181,7 +197,9 @@ writes to the memory. When it finds a problem it tells Claude, and it's Claude w
   deleted is lost. It stays on your PC, starts closed to your account and, like the page, is not to be shared. It skips
   files that look sensitive by name (`.env`, `id_rsa`, `.ssh/`…) and hidden folders. Whatever goes in stays in the old
   versions: if you ever wrote down something that shouldn't be there, delete the `historial/` folder and it starts over
-  from there.
+  from there. `--sobre` and `--buscar` with `--al DATE` answer with the memory as it was that day: to do so they copy
+  that version to your account's temp folder and delete it when done. `--cambios` and the “cambió el…” notice in
+  `--sobre` only read that history to compare versions: they store nothing.
 - Whatever Claude reads from Neuromapa goes to Anthropic, like any file Claude opens.
 - **The data folder must be yours alone**, not a shared folder or the root of a drive other accounts on the PC use:
   whoever can write there can change what Neuromapa passes to Claude. The folders Neuromapa creates start closed to your
@@ -210,7 +228,8 @@ learn from that, and Claude gets neither the warnings nor the automatic context.
 Version 0.1, being tested. Tested on Windows and Linux; not yet on Mac. The [wiki](https://github.com/lumiel777/neuromapa/wiki)
 has a step-by-step guide, FAQ and troubleshooting (in Spanish, with an
 [English summary](https://github.com/lumiel777/neuromapa/wiki/English)). If you were invited to test it, follow
-[docs/probar.md](docs/probar.md) (in Spanish). If something breaks, open an issue; for security problems, see
+[docs/probar.md](docs/probar.md) (in Spanish). If you use Obsidian, [docs/obsidian.md](docs/obsidian.md) explains how
+to use both on the same folder (in Spanish). If something breaks, open an issue; for security problems, see
 [SECURITY.md](SECURITY.md). To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md) (in Spanish); changes per version
 are in [CHANGELOG.md](CHANGELOG.md) (in Spanish).
 

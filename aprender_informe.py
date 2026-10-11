@@ -6,7 +6,7 @@ from registro import numero
 from textos import cantidad
 
 from aprender_comun import (APOYO, ARCHIVO, ARISTAS_MAPA, CAMPOS_DIA, DIAS, FUERZA_MAPA, MOSTRAR, MOSTRAR_DETALLE,
-                            VERSION, VIDA_MEDIA, clave, decimal, dia_de, en_vivo, es_nota, prendido)
+                            VERSION, VIDA_MEDIA, clave, decimal, dia_de, en_vivo, es_nota, es_temporal, prendido)
 from aprender_pista import cargar
 
 COMPARAR_MINIMO = 30
@@ -99,7 +99,7 @@ def texto(aprendido, dias, ruta, hoy=None):
         lineas.append("Se usan juntos (más fuerte primero):")
         lineas += [f"  {decimal(f)}  {aprendido.visible(a)} ↔ {aprendido.visible(b)}" for f, a, b in pares[:MOSTRAR]]
     notas = sorted((c for c in aprendido.veces if es_nota(c)), key=lambda c: -aprendido.veces[c])
-    codigo = [(n, aprendido.vecinos(n, lambda b: not es_nota(b), respaldo=False)[:3]) for n in notas]
+    codigo = [(n, aprendido.vecinos(n, lambda b: not es_nota(b) and not es_temporal(b), respaldo=False)[:3]) for n in notas]
     codigo = [(n, v) for n, v in codigo if v][:MOSTRAR]
     if codigo:
         lineas.append("Código que se abre con cada nota (lo suma «Para comprobar» aunque la nota no lo nombre):")
@@ -133,7 +133,7 @@ def para_la_pagina(nodos, hoy=None):
         return {"texto": aprendido.visible(c), "id": por_clave.get(c)}
 
     notas = sorted((c for c in aprendido.veces if es_nota(c)), key=lambda c: -aprendido.veces[c])
-    codigo = [(n, aprendido.vecinos(n, lambda b: not es_nota(b), respaldo=False)[:3]) for n in notas]
+    codigo = [(n, aprendido.vecinos(n, lambda b: not es_nota(b) and not es_temporal(b), respaldo=False)[:3]) for n in notas]
     pistas = sorted(((par[1] / par[0], par[0], c) for c, par in aprendido.pistas.items()
                      if par[0] >= 1 and not aprendido.delicado(c)), key=lambda x: (-x[0], -x[1], x[2]))
     semana = resumen_dias(aprendido.dias, 7, hoy)

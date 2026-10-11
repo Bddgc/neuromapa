@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 from collections import Counter
+from pathlib import Path
 
 import archivos
 import cerebro as nucleo
@@ -25,7 +26,7 @@ VECINOS_QUE_SUMAN = 3
 PESO_PREFIJO = 0.8
 PESO_RAIZ = 0.8
 PESO_TIPO = {"instrucciones": 1.6}
-PESO_ARCHIVO = 0.85
+PESO_ARCHIVO = 0.95
 PESO_TARJETA = 1.0
 LARGO_PREFIJO = 6
 EXTRA_MINIMO = 2
@@ -115,6 +116,18 @@ OTRO_PROYECTO = 0.5
 SIN_PROYECTO = ("feedback", "user", "indice", "instrucciones")
 VOTOS_SECCION = 5
 PARTE_SECCION = 0.6
+VOTOS_NOTA = 3
+PARTE_NOTA = 0.6
+PESO_COMMIT = 2
+RE_DERIVADA = re.compile(r"-(?:historia|parte)-\d+$")
+REGLAS = "@reglas"
+NINGUNO = "@ninguno"
+NOMBRE_PROPIO = "Neuromapa"
+NOMBRE_REGLAS = "Cómo trabajar"
+NOMBRE_NINGUNO = "Sin proyecto"
+COLORES_DE_PROYECTO = ("#199E70", "#56B4E9", "#D55E00", "#CC79A7")
+COLOR_REGLAS = "#E69F00"
+COLOR_NINGUNO = "#868E96"
 EXT_VERIFICABLES = frozenset(EXT_COMPROBAR) - {"ps1", "psm1", "sh", "bat", "cmd", "sql", "prisma"}
 TOPE_NOMBRES = 50000
 COMPROBAR = 3
@@ -295,25 +308,128 @@ def proyecto_de_seccion(titulo, nodos, lista):
     return nombrados[0] if len(nombrados) == 1 else ""
 
 
-def proyectos_de_notas(cerebro):
-    import consultas
-    lista = proyectos_conocidos()
-    salida = {}
-    secciones = {}
-    for nodo in cerebro.nodos:
-        if not cerebro.fuente_de.get(nodo["id"], {}).get("memoria"):
-            salida[nodo["id"]] = raiz_que_contiene(consultas.clave(nodo["ruta"]), lista)
+def enlace_en_indice(nodo, indices):
+    carpeta = os.path.normcase(os.path.dirname(nodo["ruta"]))
+    patron = re.compile(r"\]\(\s*<?(?:\./)?" + re.escape(os.path.basename(nodo["ruta"])) + r"[)#>\s]", re.I)
+    for indice in indices:
+        if os.path.normcase(os.path.dirname(indice["ruta"])) != carpeta:
             continue
-        gancho = cerebro.ganchos.get(nodo["id"])
-        if nodo["tipo"] in SIN_PROYECTO or not gancho or gancho[0] not in cerebro.por_id:
+        m = patron.search(indice["_cuerpo"])
+        if m:
+            return indice["id"], "", m.start()
+    return None
+
+
+def secciones_del_indice(cerebro, sin_tipos):
+    secciones = {}
+    indices = [n for n in cerebro.nodos if n["tipo"] == "indice"]
+    for nodo in cerebro.nodos:
+        if not cerebro.fuente_de.get(nodo["id"], {}).get("memoria") or nodo["tipo"] in sin_tipos:
+            continue
+        gancho = cerebro.ganchos.get(nodo["id"]) or enlace_en_indice(nodo, indices)
+        if not gancho or gancho[0] not in cerebro.por_id:
             continue
         titulo = titulo_de_seccion(cerebro.por_id[gancho[0]]["_cuerpo"], gancho[2])
         secciones.setdefault((gancho[0], titulo), []).append(nodo)
-    for (_, titulo), nodos in secciones.items():
+    return secciones
+
+
+def proyectos_de_notas(cerebro):
+    import consultas
+    lista = proyectos_conocidos()
+    salida = {n["id"]: raiz_que_contiene(consultas.clave(n["ruta"]), lista) for n in cerebro.nodos
+              if not cerebro.fuente_de.get(n["id"], {}).get("memoria")}
+    for (_, titulo), nodos in secciones_del_indice(cerebro, SIN_PROYECTO).items():
         proyecto = proyecto_de_seccion(titulo, nodos, lista)
         for nodo in nodos:
             salida[nodo["id"]] = proyecto
     return salida
+
+
+def votos_por_citas(cerebro, lista):
+    por_alias = {str(p.get("alias") or r.rsplit("/", 1)[-1]).lower(): r for r, p in lista}
+    votos = {}
+    for tipo, campo, peso in (("archivos", "proyecto", 1), ("commits", "repo", PESO_COMMIT)):
+        for entrada in (cerebro.entidades or {}).get(tipo, ()):
+            raiz = por_alias.get(str(entrada.get(campo) or "").lower())
+            for origen, _ in entrada["notas"] if raiz else ():
+                votos.setdefault(origen, Counter())[raiz] += peso
+    return votos
+
+
+def proyecto_de_cada_nota(cerebro):
+    import consultas
+    lista = proyectos_conocidos()
+    de_seccion = {}
+    for (_, titulo), nodos in secciones_del_indice(cerebro, ("indice",)).items():
+        proyecto = proyecto_de_seccion(titulo, [n for n in nodos if n["tipo"] not in SIN_PROYECTO], lista)
+        for nodo in nodos:
+            de_seccion[nodo["id"]] = proyecto
+    votos = votos_por_citas(cerebro, lista)
+    salida = {}
+    memorias = []
+    for nodo in cerebro.nodos:
+        i = nodo["id"]
+        if not cerebro.fuente_de.get(i, {}).get("memoria"):
+            salida[i] = raiz_que_contiene(consultas.clave(nodo["ruta"]), lista)
+            continue
+        memorias.append(nodo)
+        if nodo["tipo"] == "indice":
+            salida[i] = ""
+            continue
+        dicho = nucleo.proyecto_unico(f'{Path(nodo["ruta"]).stem}\n{nodo["titulo"] or ""}')
+        salida[i] = (raiz_que_contiene(consultas.clave(dicho), lista) if dicho else "") or de_seccion.get(i, "")
+        cuenta = votos.get(i)
+        if not salida[i] and cuenta and nodo["tipo"] not in SIN_PROYECTO:
+            mejor, cuantos = cuenta.most_common(1)[0]
+            if cuantos >= VOTOS_NOTA and cuantos >= PARTE_NOTA * sum(cuenta.values()):
+                salida[i] = mejor
+    por_tallo = {Path(n["ruta"]).stem.lower(): n["id"] for n in memorias}
+    de_la_madre = {}
+    for nodo in memorias:
+        madre = por_tallo.get(RE_DERIVADA.sub("", Path(nodo["ruta"]).stem.lower()))
+        if not salida[nodo["id"]] and madre and salida.get(madre):
+            de_la_madre[nodo["id"]] = salida[madre]
+    salida.update(de_la_madre)
+    repartida = {}
+    for nodo in memorias:
+        if salida[nodo["id"]]:
+            repartida.setdefault(cerebro.fuente_de[nodo["id"]]["id"], set()).add(salida[nodo["id"]])
+    for nodo in memorias:
+        fuente = cerebro.fuente_de[nodo["id"]]
+        if not salida[nodo["id"]] and fuente.get("proyecto") and len(repartida.get(fuente["id"], ())) < 2:
+            salida[nodo["id"]] = raiz_que_contiene(consultas.clave(fuente["proyecto"]), lista)
+        if not salida[nodo["id"]] and nodo["tipo"] in SIN_PROYECTO and nodo["tipo"] != "indice":
+            salida[nodo["id"]] = REGLAS
+    return salida
+
+
+def grupos_base():
+    grupos = []
+    vistos = set()
+    for raiz, p in proyectos_conocidos():
+        identificador = base = str(p.get("alias") or raiz.rsplit("/", 1)[-1]).lower()
+        k = 1
+        while identificador in vistos:
+            k += 1
+            identificador = f"{base}-{k}"
+        vistos.add(identificador)
+        nombre = NOMBRE_PROPIO if p.get("aparte") and not p.get("alias") else p.get("nombre") or p.get("alias") or base
+        grupos.append({"clave": raiz, "id": identificador, "nombre": str(nombre),
+                       "color": p.get("color") or COLORES_DE_PROYECTO[len(grupos) % len(COLORES_DE_PROYECTO)]})
+    grupos += [{"clave": REGLAS, "id": REGLAS, "nombre": NOMBRE_REGLAS, "color": COLOR_REGLAS},
+               {"clave": "", "id": NINGUNO, "nombre": NOMBRE_NINGUNO, "color": COLOR_NINGUNO}]
+    return grupos
+
+
+def grupos_de_proyecto(cerebro):
+    de_nota = proyecto_de_cada_nota(cerebro)
+    grupos = grupos_base()
+    por_clave = {g["clave"]: g["id"] for g in grupos}
+    de_nodo = {i: por_clave.get(clave, NINGUNO) for i, clave in de_nota.items()}
+    cuenta = Counter(de_nodo.values())
+    return de_nodo, [{"id": g["id"], "nombre": g["nombre"], "color": g["color"], "cantidad": cuenta[g["id"]]}
+                     for g in grupos if cuenta[g["id"]]]
 
 
 def rutas_de_codigo():
@@ -1409,6 +1525,19 @@ def aviso_suelto(aviso):
     return f"      {rotulo}: {texto}"
 
 
+def cambio_en_linea(cambio):
+    return f'      cambió el {cambio["cuando"]} (línea {cambio["linea"]}); antes decía: {citar(cambio["antes"])}'
+
+
+def cambios_del_historial(resultado):
+    try:
+        import vigencia
+        vigencia.anotar(resultado)
+    except Exception:
+        import hooks_comun
+        hooks_comun.fallo()
+
+
 def texto_sobre(resultado, tope=TOPE_SOBRE):
     lo_nombran = "nota lo nombra" if resultado["notas"] == 1 else "notas lo nombran"
     cabeza = f'Sobre «{resultado["tema"]}»: {resultado["notas"]} {lo_nombran}; '
@@ -1436,6 +1565,7 @@ def texto_sobre(resultado, tope=TOPE_SOBRE):
         porque = f' ({p["porque"]})' if p["porque"] else ""
         cola.append(f"  {lugar_de_lectura(p)}{porque}")
         cola += [aviso_en_linea(aviso) for aviso in p.get("avisos", ())]
+        cola += [cambio_en_linea(cambio) for cambio in p.get("cambios", ())]
     if resultado.get("decisiones"):
         cola.append(TITULO_DECISIONES)
         cola.extend(f'  {lugar_de_lectura(d)}  {citar(d["texto"])}' for d in resultado["decisiones"])
@@ -1457,12 +1587,12 @@ def texto_sobre(resultado, tope=TOPE_SOBRE):
     return lineas + cuerpo + cola
 
 
-def main(consulta, sobre=False, todo=False, maximo=8):
-    indice = desde_disco()
+def responder(indice, consulta, sobre=False, todo=False, maximo=8, memoria=None, anotar=None):
     grupos = None if todo else ALCANCE
     if sobre:
-        import aprender
-        resultado = indice.sobre(consulta, grupos, memoria=aprender.contexto(os.getcwd()))
+        resultado = indice.sobre(consulta, grupos, memoria=memoria)
+        if anotar is not None:
+            anotar(resultado)
         salida = texto_sobre(resultado)
         citado = resultado["terminos"] and resultado["grupos"]
     else:
@@ -1474,7 +1604,16 @@ def main(consulta, sobre=False, todo=False, maximo=8):
     if not indice.notas:
         salida = [f'{"Sobre" if sobre else "Buscar"} {citar(consulta, 120)}: no hay notas donde buscar.',
                   nucleo.donde_busque()]
-    for linea in salida:
+    return salida
+
+
+def main(consulta, sobre=False, todo=False, maximo=8):
+    indice = desde_disco()
+    memoria = None
+    if sobre:
+        import aprender
+        memoria = aprender.contexto(os.getcwd())
+    for linea in responder(indice, consulta, sobre, todo, maximo, memoria, cambios_del_historial if sobre else None):
         print(linea)
     return 0
 

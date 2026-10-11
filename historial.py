@@ -1,11 +1,14 @@
 import datetime
 import hashlib
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
+import zipfile
 from pathlib import Path
 
 import cerebro as nucleo
@@ -28,6 +31,9 @@ _limite = [None]
 TOPE_RENGLONES = 3
 LARGO_RENGLON = 200
 NOMBRES_CAMBIO = {"M": ("cambiada", "cambiadas"), "A": ("nueva", "nuevas"), "D": ("borrada", "borradas")}
+RE_HORA = r"(?:[ T,]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?\Z"
+RE_FECHA_ISO = re.compile(r"(\d{4})-(\d{1,2})-(\d{1,2})" + RE_HORA)
+RE_FECHA_DIA = re.compile(r"(\d{1,2})/(\d{1,2})(?:/(\d{2}|\d{4}))?" + RE_HORA)
 
 
 def carpetas():
@@ -52,7 +58,7 @@ def hay_git():
     return shutil.which("git") is not None
 
 
-def git(carpeta, *argumentos, binario=False):
+def git(carpeta, *argumentos, binario=False, entrada=None):
     orden = ["git", f"--git-dir={repo_de(carpeta)}", f"--work-tree={carpeta}", "-c", "core.autocrlf=false",
              "-c", "core.quotepath=false", "-c", "user.name=Neuromapa", "-c", "user.email=neuromapa@localhost",
              "-c", "commit.gpgsign=false", "-c", f"core.hooksPath={repo_de(carpeta) / 'sin-hooks'}", *argumentos]
@@ -61,8 +67,9 @@ def git(carpeta, *argumentos, binario=False):
     if espera <= 0:
         return None
     try:
-        proceso = subprocess.run(orden, cwd=carpeta, env=entorno, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                 timeout=espera, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        proceso = subprocess.run(orden, cwd=carpeta, env=entorno, input=entrada, stdout=subprocess.PIPE,
+                                 stderr=subprocess.DEVNULL, timeout=espera,
+                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except (OSError, subprocess.SubprocessError):
         return None
     if proceso.returncode != 0:
@@ -328,6 +335,111 @@ def main_buscar(buscado):
         print(f"  Hoy está en: {', '.join(hoy)}." if hoy else "  Hoy no está en ninguna nota.")
     if not encontrado:
         print(f"«{buscado}» no aparece en la memoria de hoy ni en su historial.")
+    return 0
+
+
+def momento_de(texto, ahora=None):
+    texto = str(texto or "").strip()
+    hoy = datetime.datetime.fromtimestamp(time.time() if ahora is None else ahora)
+    m = RE_FECHA_ISO.match(texto)
+    if m:
+        anio, mes, dia = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    else:
+        m = RE_FECHA_DIA.match(texto)
+        if not m:
+            return None
+        dia, mes, anio = int(m.group(1)), int(m.group(2)), int(m.group(3)) if m.group(3) else None
+        if anio is not None and anio < 100:
+            anio += 2000
+    hora, minuto, segundo = (int(m.group(4)), int(m.group(5)), int(m.group(6) or 59)) if m.group(4) else (23, 59, 59)
+    try:
+        momento = datetime.datetime(anio or hoy.year, mes, dia, hora, minuto, segundo)
+        if anio is None and momento.date() > hoy.date():
+            momento = momento.replace(year=hoy.year - 1)
+        return momento.timestamp()
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def version_al(carpeta, momento):
+    for linea in (git(carpeta, "log", "--format=%h %ct") or "").splitlines():
+        corto, _, tiempo = linea.partition(" ")
+        if tiempo.isdigit() and int(tiempo) <= momento:
+            return corto, int(tiempo)
+    return None
+
+
+def foto(carpeta, version, destino):
+    datos = git(carpeta, "archive", "--format=zip", version, binario=True)
+    if not datos:
+        return False
+    try:
+        with zipfile.ZipFile(io.BytesIO(datos)) as paquete:
+            paquete.extractall(destino)
+    except (OSError, ValueError, zipfile.BadZipFile):
+        return False
+    return True
+
+
+def consultar(fotos, consulta, sobre, todo, maximo):
+    import buscador
+    guardadas = [(fuente, fuente["raices"]) for fuente in nucleo.FUENTES]
+    puestas = set()
+    try:
+        for fuente, raices in guardadas:
+            nuevas = []
+            for ruta, recursivo, alias in raices if fuente.get("memoria") else ():
+                clave = os.path.normcase(os.path.realpath(ruta))
+                if clave in fotos and clave not in puestas:
+                    puestas.add(clave)
+                    nuevas.append((str(fotos[clave][0]), recursivo, alias))
+            fuente["raices"] = nuevas
+        indice = buscador.Indice(nucleo.desde_disco())
+    finally:
+        for fuente, raices in guardadas:
+            fuente["raices"] = raices
+    lineas = buscador.responder(indice, consulta, sobre, todo, maximo)
+    for destino, carpeta, _ in fotos.values():
+        lineas = [linea.replace(str(destino), carpeta).replace(destino.as_posix(), carpeta.replace("\\", "/"))
+                  for linea in lineas]
+    return lineas
+
+
+def main_al(consulta, cuando, sobre=True, todo=False, maximo=8):
+    momento = momento_de(cuando)
+    if momento is None:
+        print('Error: no entendí la fecha de --al. Va como 2026-10-06, 6/10 o "6/10 18:30" (sin hora, hasta el final de ese '
+              "día).")
+        return 2
+    lista = carpetas()
+    if not lista or not hay_git():
+        print(linea_salud() or "No hay carpetas de memoria en la configuración.")
+        return 1
+    guardar()
+    with tempfile.TemporaryDirectory(prefix="neuromapa-al-") as temporal:
+        fotos = {}
+        for n, carpeta in enumerate(lista):
+            hallada = version_al(carpeta, momento)
+            destino = Path(temporal) / f"memoria-{n}"
+            if hallada and foto(carpeta, hallada[0], destino):
+                fotos[os.path.normcase(carpeta)] = (destino, carpeta, hallada)
+        if not fotos:
+            primeras = [min(tiempos) for tiempos in map(versiones, lista) if tiempos]
+            print(f"El historial de la memoria empieza el {fecha(min(primeras))}: no guarda cómo estaba antes de eso."
+                  if primeras else "Historial de la memoria: todavía sin versiones.")
+            return 1
+        lineas = consultar(fotos, consulta, sobre, todo, maximo)
+    for _, carpeta, (corto, tiempo) in fotos.values():
+        print(f"La memoria de {carpeta} como estaba el {fecha(tiempo)} (la última versión guardada hasta el "
+              f"{fecha(momento)}).")
+    for linea in lineas:
+        print(linea)
+    print("Solo la memoria: los documentos de los proyectos no están en el historial. Las rutas son las de hoy; esas notas "
+          "pueden haber cambiado, haberse partido o no existir más.")
+    for _, carpeta, (corto, _) in fotos.values():
+        nombrada = re.compile(re.escape(carpeta) + r"[\\/]([^\\/:«»\"]+?\.md)")
+        ejemplo = next((m.group(1) for m in map(nombrada.search, lineas) if m and m.group(1) != "MEMORY.md"), "NOTA.md")
+        print(f'Para leer una nota entera como estaba: git --git-dir="{repo_de(carpeta)}" show {corto}:"{ejemplo}"')
     return 0
 
 
