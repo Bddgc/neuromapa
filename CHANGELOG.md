@@ -229,6 +229,9 @@ Para quien abre el mapa por primera vez:
 
 Para que un error de tipeo o un archivo raro no rompa nada en silencio:
 
+- En Mac y Linux, lo que dice el ítem siguiente de una lista («se borró», «temporal») ya no calla el aviso de una ruta
+  que no existe. Para ver si el renglón ya lo aclaraba, el médico miraba 80 letras después de la ruta, y con las
+  rutas cortas de esos sistemas llegaba al ítem de abajo. Ahora mira solo hasta el final del ítem o del párrafo.
 - `neuromapa chequeo` (y `--chequeo`) revisa la instalación y dice qué falta en palabras simples: Python, la
   configuración, si encuentra notas, si los hooks están puestos (y no dos veces, ni apuntando a una carpeta que se
   movió), si el registro anota y Claude recibe la pista, el mapa, git, los permisos y Codex. No cambia nada ni muestra

@@ -48,6 +48,7 @@ RE_SIGUE_LISTA = re.compile(r" ?(?:[,/+]|(?:y|e|o|u|ni|and|or)\b)[^;()]*$", re.I
 RE_FIN_DE_ORACION = re.compile(r"[.!?](?: |$)")
 RE_PALABRA_COMMIT = re.compile(r"commit|merge|\brama\b|branch|cherry|revert", re.I)
 RE_ITEM_DE_LISTA = re.compile(r"\n[ \t]*(?:[-*+]|\d+[.)])[ \t]")
+RE_FIN_DE_TRAMO = re.compile(r"\n[ \t]*(?:\n|(?:[-*+]|\d+[.)])[ \t]|#|\|)")
 LARGO_ENTRE_HUELLAS = 60
 HUELLA_CERCA = 200
 RE_UNIDAD = re.compile(r"(?<!\w)[A-Za-z]:[\\/]")
@@ -514,7 +515,8 @@ es_historica = nucleo.es_historica
 
 def alrededor(texto, posicion, despues=80):
     a = texto.rfind("\n", 0, posicion) + 1
-    return texto[a:posicion + despues]
+    corte = RE_FIN_DE_TRAMO.search(texto, posicion, posicion + despues)
+    return texto[a:corte.start() if corte else posicion + despues]
 
 
 def rutas_rotas(ruta_nota, texto, antes=""):

@@ -304,6 +304,14 @@ def revisar_rutas_temporales(t):
            "de la temporal; y a una que existe en la temporal no le propone sumarla a las fuentes",
            del_renglon("plan-viejo.md").startswith("AVISO ")
            and not [r for r in salud.splitlines() if "notas.md" in r and "fuentes" in r], salud[-900:])
+    import medico
+    texto = ("- La copia quedó en `/x/a.md`.\n\n- Lo de las rutas temporales se borró.\n"
+             "- Y la de `/x/b.md`, que\n  se borró ayer.\n- Otra: `/x/c.md`.\n| fila | se movió |\n")
+    tramos = [medico.alrededor(texto, texto.index(f"/x/{n}.md"), 80) for n in "abc"]
+    probar("lo que dice el ítem siguiente de la lista, otro párrafo o una fila de tabla no calla el aviso de una ruta "
+           "(«se borró», «temporal»), y lo que sigue en el mismo ítem, aunque pase al renglón de abajo, sí (en Linux y "
+           "Mac, con rutas cortas, el ítem de abajo entraba en las 80 letras y callaba el aviso)",
+           "temporal" not in tramos[0] and "se borró ayer" in tramos[1] and "se movió" not in tramos[2], tramos)
 
 
 def revisar_rutas_de_red(t):

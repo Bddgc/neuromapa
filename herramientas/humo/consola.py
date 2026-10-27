@@ -249,22 +249,24 @@ def revisar_pendientes(t):
            "aviso del médico de esa misma nota, y si no se pueden mirar los commits lo dice en vez de fallar",
            cuantos == 2 and [p["linea"] for p in marcados if p["quizas"]] == [12, 14] and sin_git is None,
            (cuantos, [(p["linea"], p["quizas"]) for p in marcados], sin_git))
+    unidad, barra = ("D:\\", "\\") if os.name == "nt" else ("/r/", "/")
+    vivero, taller = f"{unidad}vivero", f"{unidad}taller"
     sin_commit = {"id": "s", "ruta": "C:/m/cartel.md", "titulo": "Cartel", "_desfase": 0, "_cuerpo": (
         "# Cartel\n\n- El cartel se guardó sin commit (8/10).\n"
-        "- Los arreglos de `D:\\taller\\docs` quedaron sin commit allá (8/10).\n"
-        "- También aprobó los del taller, en `D:\\taller`: HECHO (8/10); quedaron 3 con cambios sin commit.\n"
-        "- La foto del riego en `D:\\fotos\\riego.png` quedó sin commit (8/10).\n"
+        f"- Los arreglos de `{taller}{barra}docs` quedaron sin commit allá (8/10).\n"
+        f"- También aprobó los del taller, en `{taller}`: HECHO (8/10); quedaron 3 con cambios sin commit.\n"
+        f"- La foto del riego en `{unidad}fotos{barra}riego.png` quedó sin commit (8/10).\n"
         "- El cartel nuevo quedó sin commit (12/10).\n")}
     hoy_commit = datetime.date(2026, 10, 13)
-    estados = {"D:\\vivero": (True, datetime.datetime(2026, 10, 9, 15).timestamp()),
-               "D:\\taller": (False, datetime.datetime(2026, 10, 9, 15).timestamp())}
+    estados = {vivero: (True, datetime.datetime(2026, 10, 9, 15).timestamp()),
+               taller: (False, datetime.datetime(2026, 10, 9, 15).timestamp())}
     buscador_humo = importlib.import_module("buscador")
     conocidos = buscador_humo.proyectos_conocidos
-    buscador_humo.proyectos_conocidos = lambda: [("d:/vivero", {"alias": "vivero"}), ("d:/taller", {"alias": "taller"})]
+    buscador_humo.proyectos_conocidos = lambda: [(consultas.clave(vivero), {"alias": "vivero"}),
+                                                 (consultas.clave(taller), {"alias": "taller"})]
     try:
         de_commit = pendientes.de_la_nota(sin_commit, hoy_commit)
-        cuantos_commit = pendientes.marcar_commiteados(None, de_commit, {"s": "vivero"}, ["D:\\vivero", "D:\\taller"],
-                                                       estados.get)
+        cuantos_commit = pendientes.marcar_commiteados(None, de_commit, {"s": "vivero"}, [vivero, taller], estados.get)
     finally:
         buscador_humo.proyectos_conocidos = conocidos
     probar("un «sin commit» queda «quizás ya está commiteado» si su repo no tiene nada sin commit y tuvo un commit desde la "
