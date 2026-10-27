@@ -14,7 +14,7 @@ DEMO_ESPERADOS = [
     "La description («Base de datos») casi no dice nada",
     "El name dice «weather»",
     "La línea del índice para arreglo-horario-verano.md no dice cuándo abrirla",
-    "Se parece a mercadopago-avisos-repetidos.md",
+    "Se parece a avisos-repetidos-mp.md",
     "está sin probar, pero esa nota dice que se probó",
     "Dice 5 (módulos de la API",
 ]

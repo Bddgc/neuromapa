@@ -3,7 +3,16 @@
 Las versiones siguen el número de `.claude-plugin/plugin.json` (`claude plugin list` lo muestra, y Claude lo ve con `neuromapa --version`). Cada versión que
 sale sube ese número; si no, la actualización puede no traer nada (ver [CONTRIBUTING.md](CONTRIBUTING.md)).
 
-## 0.1.6 — en prueba
+## 0.1.7 — en prueba
+
+Para que el clon no quede a medias en Windows:
+
+- Tres notas de la demo tenían rutas de 70 a 74 letras y, clonadas dentro de una carpeta honda, Windows no las
+  creaba («Filename too long») y git dejaba el clon incompleto. Ahora se llaman `avisos-repetidos-mp.md`,
+  `arreglo-webhook-doble.md` y `fix-double-reply.md`, con los enlaces y el índice de la demo al día.
+- Las pruebas de GitHub revisan que ninguna ruta pase de 68 letras (`herramientas/rutas_cortas.py`).
+
+## 0.1.6
 
 Para que el índice de la memoria no se llene solo:
 

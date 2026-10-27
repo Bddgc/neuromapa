@@ -16,4 +16,4 @@ La web vende con el checkout de Mercado Pago. El flujo:
 Las credenciales van en variables de entorno de la API, nunca en el repo ni en una nota.
 
 Mercado Pago puede mandar el mismo aviso más de una vez: por eso cada pago se procesa una sola vez, por su id. Lo que
-pasó cuando no era así: [[arreglo-webhook-duplicado]].
+pasó cuando no era así: [[arreglo-webhook-doble]].

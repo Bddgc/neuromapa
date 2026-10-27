@@ -18,7 +18,7 @@ Memory for chats that start in `proyectos/trailbot`. Everything here is in Engli
 
 ## Fixes
 - [Fix: timezone in forecasts](fix-timezone.md) — forecasts were for the wrong day after 9 pm
-- [Fix: duplicate messages](fix-duplicate-messages.md) — Telegram retries made /today answer twice
+- [Fix: duplicate messages](fix-double-reply.md) — Telegram retries made /today answer twice
 - [Fix: rating spam](fix-rating-spam.md) — one rating per user, per trail, per day
 
 ## Plans

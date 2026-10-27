@@ -1,5 +1,5 @@
 ---
-name: fix-duplicate-messages
+name: fix-double-reply
 description: Fix: Telegram retried slow webhook calls and /today answered twice; updates are now handled once by update_id
 metadata:
   node_type: memory

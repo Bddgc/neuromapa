@@ -1,5 +1,5 @@
 ---
-name: arreglo-webhook-duplicado
+name: arreglo-webhook-doble
 description: Compras de la web registradas por duplicado porque Mercado Pago reenvía avisos ya entregados; ahora cada pago cuenta una vez
 metadata:
   node_type: memory

@@ -16,7 +16,7 @@ Memoria de los chats que arrancan en `proyectos/vivero`. La de trailbot es otra 
 - [Sensores de humedad](riego-sensores.md) — calibración, lecturas raras y qué hacer si un sensor se muere
 - [Stock de plantas](stock-plantas.md) — tabla `stock_plantas`, movimientos y alertas de stock bajo
 - [Ventas con Mercado Pago](ventas-mercadopago.md) — checkout, webhook y estados del pago
-- [Avisos repetidos de Mercado Pago](mercadopago-avisos-repetidos.md) — el mismo aviso de pago llega varias veces
+- [Avisos repetidos de Mercado Pago](avisos-repetidos-mp.md) — el mismo aviso de pago llega varias veces
 - [Avisos por WhatsApp](avisos-whatsapp.md) — stock bajo y riego fallido, con tope diario para no molestar a Marta
 - [Base de datos](base-de-datos.md) — SQLite, migraciones y respaldo de cada noche
 - [La Raspberry del vivero](raspberry-del-vivero.md) — dónde está, cómo entrar y dónde mirar los logs del riego
@@ -24,7 +24,7 @@ Memoria de los chats que arrancan en `proyectos/vivero`. La de trailbot es otra 
 ## Arreglos
 - [Arreglo: riego doble](arreglo-riego-doble.md) — la zona del invernadero regaba dos veces después de un corte de luz
 - [Arreglo: stock negativo](arreglo-stock-negativo.md) — dos ventas al mismo tiempo dejaban el stock en menos uno
-- [Arreglo: webhook duplicado](arreglo-webhook-duplicado.md) — pagos contados dos veces por avisos repetidos
+- [Arreglo: webhook duplicado](arreglo-webhook-doble.md) — pagos contados dos veces por avisos repetidos
 - [Arreglo: horario de verano](arreglo-horario-verano.md) — DST
 
 ## Pendientes

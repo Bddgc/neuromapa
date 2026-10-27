@@ -32,5 +32,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Compila todo el Python
         run: python -m compileall -q .
+      - name: Rutas cortas (que el clon no falle en Windows dentro de una carpeta honda)
+        run: python herramientas/rutas_cortas.py
       - name: Prueba de humo (notas inventadas en una carpeta temporal)
         run: python herramientas/prueba_humo.py

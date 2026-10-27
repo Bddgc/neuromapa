@@ -41,6 +41,7 @@ página al armarla, con la huella verificada. Si faltara `vendor/`, la página l
 | `vendor/` | d3 y marked, que entran adentro de la página (licencias en `vendor/LICENCIAS.md`). De d3, solo los 11 módulos que usa la página (fuerzas, selección, color, transiciones, arrastre y zoom, con sus dependencias), cada uno en su archivo y en el orden en que se necesitan: 77 KiB en vez de los 273 del d3 entero. Si falta alguno, la página baja los 11 de `cdn.jsdelivr.net`, en ese orden y con su huella. |
 | `herramientas/prueba_humo.py` | Arma notas inventadas en una carpeta temporal y revisa todo sin tocar lo tuyo. Es la entrada: las pruebas están en `herramientas/humo/`, una parte por tema (cada una de menos de 100 KiB), y lo común (las notas inventadas, `probar`, el aislamiento) en `humo/base.py`. |
 | `herramientas/verificar.py` | Revisa la sintaxis del JavaScript de la página y que se arme, en una carpeta temporal. |
+| `herramientas/rutas_cortas.py` | Revisa que ninguna ruta del repositorio pase de 68 letras, para que el clon no falle en Windows. |
 | `herramientas/bajar_librerias.py` | Vuelve a bajar d3 y marked a `vendor/`, verificando su huella. |
 
 ## Los hooks

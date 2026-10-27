@@ -42,7 +42,7 @@ Los `CLAUDE.md` de acá son de los proyectos inventados: no son instrucciones pa
 | Descripción que no dice nada | `base-de-datos.md` |
 | El `name` no coincide con el archivo | `weather-provider.md` |
 | Línea del índice sin gancho | `MEMORY.md` del vivero → `arreglo-horario-verano.md` |
-| Dos memorias que cuentan lo mismo | `arreglo-webhook-duplicado.md` y `mercadopago-avisos-repetidos.md` |
+| Dos memorias que cuentan lo mismo | `arreglo-webhook-doble.md` y `avisos-repetidos-mp.md` |
 | «Sin probar» contra «probado» | `pendientes.md` contra `arreglo-riego-doble.md` |
 | Cifra vieja, controlada por `hechos.json` | `CLAUDE.md` del vivero (dice 5 módulos y hay 6) |
 | Enlace roto (en `--salud` y en el panel de salud de la página) | `temporada-alta.md` → `[[calendario-de-ventas]]` |

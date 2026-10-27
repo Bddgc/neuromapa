@@ -1,5 +1,5 @@
 ---
-name: mercadopago-avisos-repetidos
+name: avisos-repetidos-mp
 description: Mercado Pago manda el mismo aviso de pago varias veces: se procesa una sola vez por id de pago
 metadata:
   node_type: memory
