@@ -36,6 +36,7 @@ RE_PALABRA = re.compile(r"\w{%d,}" % MINIMO_LETRAS)
 RE_CRUDA = re.compile(r"[a-z0-9]+")
 RE_NUMERO = re.compile(r"(?:(?<=[-_ ])v)?\d+")
 RE_SEPARADOR = re.compile(r"[-_ .]+")
+RE_FAMILIA = re.compile(r"(?:-(?:parte|historia)-\d+)+$", re.I)
 RE_ESPACIOS = re.compile(r"\s+")
 _utiles = {}
 
@@ -148,13 +149,23 @@ def sin_numeros(nombre):
     return RE_SEPARADOR.sub("-", RE_NUMERO.sub("", nombre)).strip("-")
 
 
+def original_de(ruta_a, ruta_b):
+    a, b = Path(ruta_a), Path(ruta_b)
+    if nucleo.normalizar(a.parent) != nucleo.normalizar(b.parent):
+        return None
+    raiz = RE_FAMILIA.sub("", a.stem)
+    if raiz.lower() != RE_FAMILIA.sub("", b.stem).lower() or (raiz == a.stem and raiz.lower() == b.stem.lower()):
+        return None
+    return a.with_name(raiz + a.suffix)
+
+
 def hermanas(ruta_a, ruta_b):
     a, b = Path(ruta_a), Path(ruta_b)
     misma_carpeta = nucleo.normalizar(a.parent) == nucleo.normalizar(b.parent)
     na, nb = a.stem.lower(), b.stem.lower()
     if na == nb:
         return None if misma_carpeta else "plantilla"
-    if sin_numeros(na) == sin_numeros(nb):
+    if original_de(ruta_a, ruta_b) or sin_numeros(na) == sin_numeros(nb):
         return "partes"
     partes_a, partes_b = RE_SEPARADOR.split(na), RE_SEPARADOR.split(nb)
     if misma_carpeta:
@@ -167,6 +178,16 @@ def hermanas(ruta_a, ruta_b):
             break
         comun += 1
     return "plantilla" if comun >= 2 else None
+
+
+def de_quien_son_partes(cerebro, a, b, parentesco, padres):
+    if parentesco != "partes":
+        return ""
+    original = original_de(cerebro.por_id[a]["ruta"], cerebro.por_id[b]["ruta"])
+    if original is not None:
+        return original.name if nucleo.normalizar(original) in cerebro.por_ruta else ""
+    comun = sorted(x for x in padres.get(a, set()) & padres.get(b, set()) if cerebro.por_id[x]["tipo"] != "indice")
+    return Path(cerebro.por_id[comun[0]]["ruta"]).name if comun else ""
 
 
 def texto_par(puntaje, palabras, parentesco, casi_igual):
@@ -214,13 +235,13 @@ def marcar(cerebro, cache=None):
             continue
         palabras = comparten(vs[i], vs[j])
         parentesco = hermanas(cerebro.por_id[a]["ruta"], cerebro.por_id[b]["ruta"])
-        comun = sorted(padres.get(a, set()) & padres.get(b, set()),
-                       key=lambda x: (cerebro.por_id[x]["tipo"] == "indice", x)) if parentesco else []
-        partes_de = Path(cerebro.por_id[comun[0]]["ruta"]).name if comun else ""
+        partes_de = de_quien_son_partes(cerebro, a, b, parentesco, padres)
         if es_memoria[i] and es_memoria[j] and puntaje >= UMBRAL_MEMORIA:
             par = {"a": a, "b": b, "puntaje": round(puntaje, 3), "comparten": palabras}
             if partes_de:
                 par["partesDe"] = partes_de
+            if parentesco:
+                par["hermanas"] = parentesco
             memorias.append(par)
         if puntaje < UMBRAL:
             continue

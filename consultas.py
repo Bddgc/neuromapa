@@ -106,7 +106,7 @@ class Medidor:
             self.pedido[s] = True
             self.con_consulta += 1
         rutas = rutas_de(ev.get("fs"))
-        if not rutas:
+        if not rutas or registro.sin_lecturas(ev):
             return
         pendientes = self.pendientes.setdefault((s, a), {})
         for c in [c for c, t0 in pendientes.items() if t - t0 > VENTANA_ACIERTO]:
@@ -139,7 +139,7 @@ class Medidor:
             for ruta in valor[:MAXIMO_FS] if isinstance(valor, list) else []:
                 if not isinstance(ruta, str):
                     continue
-                llave = ("ruta", clave(ruta)) if aprendido else ("codigo", nombre_de(ruta))
+                llave = ("ruta", clave(ruta)) if aprendido or "/" in clave(ruta) else ("codigo", nombre_de(ruta))
                 if llave not in pendientes:
                     self.pistas["codigo_ap" if aprendido else "codigo"] += 1
                     pendientes[llave] = (t, aprendido)

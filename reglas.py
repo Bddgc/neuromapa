@@ -6,8 +6,8 @@ from collections import Counter
 from pathlib import Path
 
 import cerebro as nucleo
-from archivos import dentro, es_sensible, escribir_atomico
-from textos import cantidad, detalle
+from archivos import dentro, es_sensible, escribir_atomico, estado_generado
+from textos import cantidad, detalle, entre_comillas, sin_wiki
 
 CARPETA = (".claude", "rules")
 MARCA = "neuromapa"
@@ -27,7 +27,6 @@ PODADAS = {".claude", ".git", "node_modules", "__pycache__"}
 RE_CODIGO = re.compile(r"`([^`\n]{3,200})`")
 RE_RENGLON = re.compile(r":\d+(?:-\d+)?$")
 RE_GLOB = re.compile(r"([\[\]{}*?])")
-RE_WIKI = re.compile(r"\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]")
 RE_PROPIA = re.compile(r"^" + MARCA + r":[ \t]*(.*?)[ \t]*$", re.M)
 ESTADOS = {"nueva": "no existe todavía", "igual": "ya está escrita y al día",
            "propia": "ya está escrita, pero la memoria o la carpeta cambiaron: se puede volver a escribir",
@@ -215,10 +214,6 @@ def patron(nombre):
     return RE_GLOB.sub(r"\\\1", nombre) + "/**/*"
 
 
-def entre_comillas(texto):
-    return "'" + texto.replace("'", "''") + "'"
-
-
 def entera(nodo):
     return len(nodo["_cuerpo"].strip().encode("utf-8")) <= ENTERA
 
@@ -228,7 +223,7 @@ def cuerpo_de(nodo):
     cuerpo = nodo["_cuerpo"].strip()
     lineas = [] if cuerpo.startswith("# ") and entera(nodo) else [f'# {nodo["titulo"] or Path(nodo["ruta"]).stem}', ""]
     if entera(nodo):
-        lineas += [RE_WIKI.sub(r"`\1`", cuerpo), "",
+        lineas += [sin_wiki(cuerpo, "`{destino}`"), "",
                    f"Esta regla es una copia de la memoria `{archivo}`: si no coinciden, vale la memoria."]
     else:
         descripcion = (nodo.get("descripcion") or "").strip()
@@ -248,15 +243,7 @@ def destino_de(c):
 
 
 def estado_de(c):
-    destino = destino_de(c)
-    try:
-        actual = destino.read_bytes().decode("utf-8", errors="replace").replace("\r\n", "\n")
-    except OSError:
-        return "nueva"
-    if actual == texto_de(c):
-        return "igual"
-    cabeza = actual.split("\n---\n", 1)[0] if actual.startswith("---\n") and "\n---\n" in actual else ""
-    return "propia" if RE_PROPIA.search(cabeza) else "ajena"
+    return estado_generado(destino_de(c), texto_de(c), RE_PROPIA)
 
 
 def codigo_de(c):

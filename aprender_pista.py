@@ -7,7 +7,7 @@ from registro import numero
 
 from aprender_comun import (APOYO, ARCHIVO, A_MANO, COLA, FUERZA_CODIGO, FUERZA_MINIMA, MEDIA_RECIENTE, MINIMO_PROYECTO,
                             MOSTRADAS_MINIMAS, PARTES_CORTO, PARTE_PROYECTO, PESO_GENERAL, PESO_RECIENTE, PREMIO_PISTA,
-                            RECIENTE, TOQUES, VERSION, clave, en_vivo, es_de_codigo, es_nota, es_temporal, nombre, prendido,
+                            RECIENTE, TOQUES, VECINOS, VERSION, clave, en_vivo, es_de_codigo, es_nota, es_temporal, nombre, prendido,
                             proyecto_de, pruebas, raices, raiz_de, rutas_de, util)
 from aprender_memoria import Memoria
 
@@ -24,16 +24,22 @@ class Lazos:
         juntas = min(1.0, w / math.sqrt(max(self.veces.get(a, 0.0), w) * max(self.veces.get(b, 0.0), w)))
         return juntas * w / (w + APOYO)
 
+    def usados(self, a):
+        vecinos = self.lazos.get(a, {})
+        if len(vecinos) <= VECINOS:
+            return vecinos
+        return dict(sorted(vecinos.items(), key=lambda x: (-x[1], x[0]))[:VECINOS])
+
     def vecinos(self, a, filtro=None, apoyo=APOYO):
-        salida = [(self.fuerza(a, b), b) for b, w in self.lazos.get(a, {}).items()
+        salida = [(self.fuerza(a, b), b) for b, w in self.usados(a).items()
                   if w >= apoyo and (filtro is None or filtro(b))]
         return sorted((x for x in salida if x[0] > 0), key=lambda x: (-x[0], x[1]))
 
     def pares(self, apoyo=APOYO):
         vistos = set()
         salida = []
-        for a, vecinos in self.lazos.items():
-            for b, w in vecinos.items():
+        for a in self.lazos:
+            for b, w in self.usados(a).items():
                 if w >= apoyo and (b, a) not in vistos:
                     vistos.add((a, b))
                     salida.append((self.fuerza(a, b), a, b))
@@ -178,6 +184,23 @@ def servidas_por(eventos, sesion):
     return salida
 
 
+def tramos_servidos_por(eventos, sesion):
+    sesion = str(sesion or "")[:8]
+    if not sesion:
+        return set()
+    desde = compactada(eventos, sesion)
+    salida = set()
+    for ev in eventos:
+        fs, fp = ev.get("fs"), ev.get("fp")
+        if ev.get("s") != sesion or ev.get("e") != "aviso" or numero(ev.get("t")) <= desde \
+                or not isinstance(fs, list) or not isinstance(fp, list) or len(fs) != len(fp):
+            continue
+        for ruta, motivo in zip(fs, fp):
+            if isinstance(ruta, str) and isinstance(motivo, list) and len(motivo) >= 3:
+                salida.add((clave(ruta), motivo[1], motivo[2]))
+    return salida
+
+
 def recientes(carpeta, cwd, lista, ahora=None, sesion="", eventos=None):
     ahora = time.time() if ahora is None else ahora
     eventos = eventos_recientes(carpeta, ahora) if eventos is None else eventos
@@ -204,7 +227,7 @@ def recientes(carpeta, cwd, lista, ahora=None, sesion="", eventos=None):
 
 
 class Contexto:
-    def __init__(self, aprendido, cercanos=None, proyecto=None, lista=(), leidas=None, cwd="", servidas=None):
+    def __init__(self, aprendido, cercanos=None, proyecto=None, lista=(), leidas=None, cwd="", servidas=None, tramos=None):
         self.aprendido = aprendido
         self.recientes = cercanos or {}
         self.proyecto = proyecto
@@ -212,9 +235,13 @@ class Contexto:
         self.leidas = leidas or {}
         self.cwd = clave(cwd).rstrip("/") if cwd else ""
         self.servidas = servidas or set()
+        self.tramos = tramos or set()
 
     def ya_servida(self, ruta):
         return clave(ruta) in self.servidas
+
+    def ya_servido_igual(self, ruta, linea, fin):
+        return (clave(ruta), linea, fin) in self.tramos
 
     def arriba_del_chat(self, ruta):
         carpeta = clave(ruta).rsplit("/", 1)[0]
@@ -274,10 +301,11 @@ def contexto(cwd=None, sesion="", sin_aprendido=False):
         cercanos = recientes(carpeta, cwd, lista, sesion=sesion, eventos=eventos) if cwd else {}
         leidas = leidas_por(eventos, sesion)
         servidas = servidas_por(eventos, sesion)
+        tramos = tramos_servidos_por(eventos, sesion)
     except Exception:
         return None
     return Contexto(aprendido, cercanos, proyecto_de(clave(cwd), lista) if cwd else None, lista, leidas, cwd or "",
-                    servidas)
+                    servidas, tramos)
 
 
 _cache = {}

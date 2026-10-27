@@ -6,7 +6,7 @@ import permisos
 import registro
 from archivos import escribir_atomico, leer_objeto_json
 from registro import numero
-from textos import cantidad
+from textos import cantidad, decimal
 
 from aprender_charlas import *
 from aprender_comun import *
@@ -190,7 +190,7 @@ def main_olvidar(nombres):
         print(f"Olvidé lo aprendido de {rutas[0]}: {cantidad(quitados[0], 'unión', 'uniones')} del registro y "
               f"{quitados[1]} de las charlas guardadas. {despues}")
     elif any(quitados):
-        detalle_fuerza = f" (tenía fuerza {decimal(fuerza)})" if fuerza else ""
+        detalle_fuerza = f" (tenía fuerza {decimal(fuerza, 2)})" if fuerza else ""
         print(f"Olvidé la unión entre {rutas[0]} y {rutas[1]}{detalle_fuerza}. {despues}")
     else:
         print(f"No había una unión aprendida entre {rutas[0]} y {rutas[1]}; igual quedó anotado que no la aprenda de lo "

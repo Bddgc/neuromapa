@@ -22,6 +22,10 @@ LARGO_FRASE = 8
 TOPE_FRASES = 6
 TOPE_HALLADOS = 3
 ESPERA_INDICE = 1.5
+TOPE_INDICE = 200000
+TOPE_LUGARES = 3
+LLENA = 1.0
+RE_HISTORIA = re.compile(r"-historia-\d+$", re.I)
 
 
 def cola(ruta, tope=TOPE_LECTURA):
@@ -217,10 +221,12 @@ def aviso_dato_viejo(datos):
         return None
     propia = os.path.normcase(os.path.realpath(ruta))
     candidatas = {}
+    saltear = {}
     for n, _, _, texto in indice.secciones:
         nota = indice.notas[n]
-        if nota["ruta"] in candidatas or os.path.normcase(os.path.realpath(nota["ruta"])) == propia \
-                or nucleo.es_historica(nota):
+        if n not in saltear:
+            saltear[n] = os.path.normcase(os.path.realpath(nota["ruta"])) == propia or nucleo.es_historica(nota)
+        if saltear[n] or nota["ruta"] in candidatas:
             continue
         entero = f" {plano(texto)} "
         if any(f" {f} " in entero for f in frases):
@@ -238,6 +244,95 @@ def aviso_dato_viejo(datos):
     return (f"Neuromapa: en {choques.nombre_archivo(ruta)} acabás de cambiar un dato que otras notas todavía dicen igual "
             f"que antes: {lugares}. Si es el mismo dato, actualizalo ahí también; si esas cuentan otra cosa (o lo de antes "
             "sigue siendo cierto allá), no hace falta tocarlas.")
+
+
+def renglones_tocados(herramienta, entrada, texto):
+    if herramienta == "Write":
+        return None
+    cambios = [entrada] if herramienta == "Edit" else [c for c in entrada.get("edits") or [] if isinstance(c, dict)]
+    tocados = set()
+    for cambio in cambios:
+        nuevo = cambio.get("new_string")
+        nuevo = nuevo.replace("\r\n", "\n").strip("\n") if isinstance(nuevo, str) else ""
+        if not nuevo.strip():
+            continue
+        lugares = [m.start() for m in re.finditer(re.escape(nuevo), texto)]
+        if len(lugares) > TOPE_LUGARES:
+            continue
+        for lugar in lugares:
+            primero = texto.count("\n", 0, lugar) + 1
+            tocados.update(range(primero, primero + nuevo.count("\n") + 1))
+    return tocados
+
+
+def de_la_memoria(ruta):
+    import cerebro as nucleo
+    real = os.path.normcase(os.path.realpath(ruta))
+    carpetas = {os.path.normcase(os.path.realpath(str(raiz[0]))) for fuente in nucleo.FUENTES if fuente.get("memoria")
+                for raiz in fuente["raices"]}
+    return real if os.path.dirname(real) in carpetas else None
+
+
+def marcar_llena(datos):
+    entrada = datos.get("tool_input")
+    if datos.get("hook_event_name") != "PostToolUse" or datos.get("tool_name") not in ("Edit", "Write", "MultiEdit") \
+            or not isinstance(entrada, dict):
+        return None
+    ruta = entrada.get("file_path")
+    if not isinstance(ruta, str) or not ruta.lower().endswith(".md") or os.path.basename(ruta).lower() == "memory.md" \
+            or RE_HISTORIA.search(os.path.splitext(os.path.basename(ruta))[0]):
+        return None
+    import cerebro as nucleo
+    real = de_la_memoria(ruta) if nucleo.CONFIG.get("partir_sola") else None
+    if not real:
+        return None
+    import medico
+    try:
+        with open(real, "rb") as archivo:
+            crudo = archivo.read()
+    except OSError:
+        return None
+    lineas = crudo.count(b"\n") + (0 if crudo.endswith(b"\n") or not crudo else 1)
+    lleno = max(len(crudo) / (medico.TOKENS_READ * medico.BYTES_POR_TOKEN), lineas / medico.LINEAS_READ)
+    if lleno >= LLENA:
+        import dormir
+        dormir.avisar_llena(str(nucleo.DATOS))
+    return None
+
+
+def aviso_indice(datos):
+    herramienta = datos.get("tool_name")
+    entrada = datos.get("tool_input")
+    if datos.get("hook_event_name") != "PostToolUse" or herramienta not in ("Edit", "Write", "MultiEdit") \
+            or not isinstance(entrada, dict):
+        return None
+    ruta = entrada.get("file_path")
+    if not isinstance(ruta, str) or os.path.basename(ruta).lower() != "memory.md":
+        return None
+    real = de_la_memoria(ruta)
+    if not real:
+        return None
+    try:
+        if os.path.getsize(real) > TOPE_INDICE:
+            return None
+        with open(real, encoding="utf-8-sig", errors="replace", newline="") as archivo:
+            texto = archivo.read().replace("\r\n", "\n")
+    except OSError:
+        return None
+    import medico
+    tocados = renglones_tocados(herramienta, entrada, texto)
+    largos = [(letras, linea) for letras, linea in medico.renglones_largos({"_cuerpo": texto})
+              if tocados is None or linea in tocados]
+    if not largos:
+        return None
+    if len(largos) == 1:
+        cuales = f"un renglón de {largos[0][0]} letras (el {largos[0][1]})"
+    else:
+        cuales = (f"{len(largos)} renglones largos: " + lista([f"el {linea} ({letras} letras)" for letras, linea in largos]))
+    return (f"Neuromapa: en el índice {os.path.basename(ruta)} acabás de dejar {cuales}. Ese archivo se carga entero al "
+            f"empezar cada charla y Claude lee solo las primeras {medico.LINEAS_INDICE} líneas o "
+            f"{medico.BYTES_INDICE // 1000} KB: con renglones así entran menos notas. Dejá un gancho de hasta unas "
+            f"{medico.LARGO_GANCHO} letras (qué es la nota y por dónde retomar) y pasá el estado y el detalle a la nota.")
 
 
 def recordados(eventos, desde):
@@ -300,7 +395,8 @@ def main():
     try:
         datos = hooks_comun.entrada()
         hooks_comun.contexto("PostToolUse", (lambda: aviso(datos), lambda: aviso_rutas(datos), lambda: aviso_nota(datos),
-                                             lambda: aviso_dato_viejo(datos)))
+                                             lambda: aviso_dato_viejo(datos), lambda: aviso_indice(datos),
+                                             lambda: marcar_llena(datos)))
     except Exception:
         hooks_comun.fallo()
 

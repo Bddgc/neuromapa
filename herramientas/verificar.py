@@ -7,6 +7,8 @@ import tempfile
 
 CARPETA = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PLANTILLA = os.path.join(CARPETA, "plantilla.html")
+sys.path.insert(0, CARPETA)
+from archivos import plantilla_entera
 
 
 def es_comentario(linea):
@@ -18,8 +20,7 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except (AttributeError, ValueError):
         pass
-    with open(PLANTILLA, encoding="utf-8") as f:
-        texto = f.read()
+    texto = plantilla_entera(PLANTILLA)
     principal = max(re.findall(r"<script>(.*?)</script>", texto, re.S), key=len)
     with tempfile.TemporaryDirectory() as temporal:
         ruta = os.path.join(temporal, "principal.js")

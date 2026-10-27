@@ -8,12 +8,14 @@ from pathlib import Path
 CARPETA = Path(__file__).resolve().parent.parent
 PLANTILLA = CARPETA / "plantilla.html"
 VENDOR = CARPETA / "vendor"
+sys.path.insert(0, str(CARPETA))
+from archivos import plantilla_entera
 RE_LIBRERIA = re.compile(r"const (URL_\w+) = '(https://[^']+)';")
 RE_INTEGRIDAD = re.compile(r"\[(URL_\w+)\]: '(sha384-[A-Za-z0-9+/=]+)'")
 
 
 def main():
-    html = PLANTILLA.read_text(encoding="utf-8-sig")
+    html = plantilla_entera(PLANTILLA)
     huellas = dict(RE_INTEGRIDAD.findall(html))
     librerias = RE_LIBRERIA.findall(html)
     if not librerias:

@@ -20,6 +20,10 @@ def correr(argumentos):
         sys.argv = ["neuromapa abrir", "--apagar-solo"] + argumentos[1:]
         import servidor
         return servidor.main()
+    if "chequeo" in argumentos[:1] or "--chequeo" in argumentos:
+        sys.argv = ["neuromapa chequeo"] + [a for a in argumentos if a in ("--demo",)]
+        import chequeo
+        return chequeo.main()
     sys.argv = ["neuromapa"] + argumentos
     import cerebro
     return cerebro.main(epilogo="Para ver el mapa en el navegador: neuromapa abrir (con --demo, el de las notas inventadas).")

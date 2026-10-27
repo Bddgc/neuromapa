@@ -16,7 +16,12 @@ archivos Markdown con un encabezado YAML y `[[enlaces]]` entre notas.
 3. Listo. Los `[[enlaces]]` funcionan porque Claude Code le pone a cada nota el mismo nombre que a su archivo, y
    `MEMORY.md` se ve como una nota índice, con sus enlaces comunes de Markdown.
 
-Obsidian muestra solo los cambios que hace Claude: se pone al día cuando otro programa toca un archivo de la bóveda.
+Desde entonces, en el mapa de Neuromapa cada nota de esa carpeta tiene un botón **Abrir en Obsidian**, al lado de
+«Copiar» en su panel, para pasar a editarla a mano. La primera vez, el navegador pregunta si querés abrir Obsidian.
+Sale en las notas de cualquier carpeta que sea una bóveda (que tenga `.obsidian`).
+
+Los cambios que hace Claude aparecen solos en Obsidian: se pone al día cuando otro programa toca un archivo de la
+bóveda.
 
 ## Qué te da cada uno
 
@@ -30,8 +35,9 @@ Obsidian muestra solo los cambios que hace Claude: se pone al día cuando otro p
 ## Cuidados
 
 - **La carpeta `.obsidian`.** Obsidian guarda sus opciones en una carpeta `.obsidian` adentro de la bóveda, o sea
-  adentro de la memoria. No molesta: Neuromapa lee solo los `.md` que están sueltos en la carpeta de la memoria, y su
-  historial de versiones saltea las carpetas ocultas.
+  adentro de la memoria. No molesta: Neuromapa lee solo los `.md` que están sueltos en la carpeta de la memoria, su
+  historial de versiones saltea las carpetas ocultas, y una bóveda sumada como fuente tampoco se lee por dentro de
+  `.obsidian`.
 - **No muevas notas a subcarpetas.** Con la configuración de fábrica, Neuromapa lee la carpeta de la memoria sin
   subcarpetas: una nota que metas en una carpeta deja de verse en el mapa y en la búsqueda.
 - **Al cambiarle el nombre a una nota,** Obsidian puede arreglar solo los enlaces de las otras notas y los de
@@ -51,9 +57,90 @@ Obsidian muestra solo los cambios que hace Claude: se pone al día cuando otro p
 ## Si ya tenés una bóveda de Obsidian
 
 También sirve al revés: tu bóveda puede entrar al mapa como una fuente más del `config.json` (campo `fuentes`, con su
-carpeta en `raices`; ahí sí puede leer las subcarpetas). Ojo: al escribir `fuentes` dejan de usarse las de fábrica,
-así que hay que listar también la memoria de Claude Code. [Cómo funciona](como-funciona.md) explica cada campo y
-[demo/config.json](../demo/config.json) sirve de ejemplo.
+carpeta en `raices`; con `recursivo` en `true` lee también las subcarpetas). Ojo: al escribir `fuentes` dejan de
+usarse las de fábrica, así que hay que listar también la memoria de Claude Code. Por ejemplo:
 
-Esas notas aparecen en el mapa y en la búsqueda, y Neuromapa no las cambia por su cuenta. Todavía no lo probamos con
-bóvedas grandes: si algo de la tuya no se lee bien, abrí un issue.
+```json
+{
+  "fuentes": [
+    {"id": "memoria", "nombre": "Memoria", "color": "#E64980", "memoria": true, "foco": true,
+     "raices": ["~/.claude/projects/<proyecto>/memory"]},
+    {"id": "boveda", "nombre": "Mi bóveda", "color": "#228BE6", "foco": true, "huerfanas": false,
+     "raices": [{"ruta": "~/Documentos/Mi bóveda", "recursivo": true}]}
+  ]
+}
+```
+
+`"foco": true` es lo que hace que Claude reciba notas de la bóveda en la pista de cada pedido y en `--sobre`. Sin
+eso, la bóveda se ve en el mapa pero solo se busca si lo pedís (`--sobre "tema" --todo`). Si la bóveda es grande y
+sus notas les ganan el lugar a las de la memoria, `"peso_busqueda"` por debajo de 1 (por ejemplo, 0.7) la hace pesar
+menos. [Cómo funciona](como-funciona.md) explica cada campo y [demo/config.json](../demo/config.json) es un ejemplo
+más completo. Neuromapa no cambia las notas de la bóveda por su cuenta.
+
+### Qué entiende de una bóveda
+
+- **Los `[[enlaces]]` en las tres formas que escribe Obsidian** (la opción «Formato de enlace nuevo»): solo el nombre
+  (`[[Nota]]`), la ruta desde la raíz de la bóveda (`[[Carpeta/Nota]]`) y la ruta relativa a la nota
+  (`[[../Carpeta/Nota]]`). También con otro texto (`[[Nota|alias]]`), a un título (`[[Nota#Título]]`) o a un bloque
+  (`[[Nota#^id]]`), incrustados (`![[Nota]]`) y en las propiedades del encabezado.
+- **Los enlaces de Markdown** (`[texto](Nota.md)`, si apagaste «Usar [[Wikilinks]]»), en las mismas tres formas: el
+  nombre solo, la ruta desde la raíz de la bóveda (con o sin `/` adelante) y la relativa; con o sin `.md`, y con los
+  espacios codificados (`Mi%20nota.md`).
+- **Si un enlace sirve para dos notas,** gana la que está en la raíz de la bóveda, como en Obsidian: `[[Plan]]` va a
+  `Plan.md` de la raíz aunque haya otro `Plan.md` en una carpeta. Si ninguna está en la raíz, gana la que está en la
+  misma carpeta que la nota que enlaza o, si el enlace lleva carpeta, la que está en esa ruta desde la raíz. Si no se
+  puede decidir, el mapa lo muestra en Salud, en «Menciones ambiguas», y no como enlace roto. Obsidian, en ese caso,
+  abre una de las dos sin avisar (probado con Obsidian 1.14: `[[Vivero/Plan]]`, con `Proyectos/Vivero/Plan` y
+  `Archivo/Vivero/Plan`, abrió la de `Archivo`). Mirá esa lista: un enlace así puede estar llevándote a la nota vieja.
+- **Los adjuntos no son notas:** `![[foto.png]]`, un PDF o un `.canvas` no cuentan como enlaces rotos, aunque el
+  archivo no exista (Neuromapa no revisa los adjuntos).
+- **Lo que está en código no es un enlace,** igual que en Obsidian: una nota que explica cómo se enlaza, con ejemplos
+  entre comillas invertidas o en un bloque, no da avisos.
+- **Nada de una carpeta con punto entra,** como en Obsidian, que no las muestra: ni `.obsidian`, ni la papelera
+  `.trash` (lo que borrás no vuelve al mapa como si estuviera vivo), ni las versiones viejas que Syncthing guarda en
+  `.stversions`, aunque tengas tu propia lista `podar`. Se cuenta desde la raíz de la bóveda: una bóveda adentro de
+  una carpeta con punto, como la memoria de Claude bajo `~/.claude`, entra igual.
+- **Las plantillas no entran.** La carpeta que elegiste en las opciones del plugin de plantillas de Obsidian
+  («Settings → Templates → Template folder location»; Obsidian la guarda en `.obsidian/templates.json`) y la de
+  Templater (`.obsidian/plugins/templater-obsidian/data.json`) cuentan como excluidas, aunque no estén en la lista:
+  sus notas, con títulos como `{{title}}`, no entran al mapa ni a la búsqueda, y un enlace a ellas no sale como roto.
+  Si cambiás la carpeta, el mapa se rearma solo. Lo que es sintaxis de plantilla (`[[{{date}}]]`,
+  `[[<% tp.date.now() %>]]`) tampoco cuenta como enlace en ninguna otra nota.
+- **Las copias de conflicto.** Si Obsidian Sync, Dropbox o Syncthing dejan una copia de conflicto al lado de una nota
+  (`Nota (Conflicted copy …).md`, `Nota.sync-conflict-….md`), el médico la avisa y dice cuál es la buena: juntá lo
+  que sirva en esa y borrá la copia. Mientras tanto, en la memoria, un `[[enlace]]` lleva a la buena, porque manda el
+  nombre del archivo (como en Obsidian) aunque la copia tenga el mismo `name:`.
+- **Lo que excluiste en Obsidian tampoco entra.** Neuromapa lee la lista de archivos excluidos de la bóveda
+  («Settings → Files and links → Excluded files»; Obsidian la guarda en `.obsidian/app.json`): cada carpeta o
+  archivo de la lista, contado desde la raíz de la bóveda, y cada expresión entre barras (`/borrador/`). Los dibujos
+  de Excalidraw (`.excalidraw.md`) tampoco entran: por dentro son datos del dibujo, no texto. Un enlace a algo que
+  quedó afuera no sale como roto, porque en Obsidian sigue andando. Si cambiás la lista, el mapa se rearma solo.
+- **Los alias y las etiquetas.** Neuromapa lee las propiedades como las guarda Obsidian (una lista, un valor por
+  renglón). Los `aliases:` cuentan como otros nombres de la nota: `--sobre` y la pista la encuentran por ellos.
+  Las etiquetas salen de `tags:` y de los `#tema` del texto (fuera de código); también ayudan a encontrar la nota, se
+  ven en su panel y arman un filtro «Etiquetas» en la columna del mapa, como el de Grupos. Fuera de una bóveda, y en la
+  memoria de Claude aunque la abras como bóveda, un `#algo` suelto en el texto no cuenta como etiqueta (ahí suelen ser
+  colores o anclas), pero `tags:` en el encabezado sí.
+
+Lo que todavía no hace: las etiquetas no unen notas en el mapa (son un filtro) y los `.canvas` no se leen. Un alias no
+sirve como destino de un enlace: cuando elegís un alias, Obsidian escribe `[[Nota|alias]]`, y esa forma sí anda. Si
+le cambiaste el nombre a la carpeta de configuración (la opción para usar otra en vez de `.obsidian`), Neuromapa no
+encuentra la lista de archivos excluidos ni saltea esa carpeta: sumala a `podar` en `config.json`.
+Escribir `podar` reemplaza la lista de fábrica, así que repetila entera: `node_modules`, `.git`, `.next`, `dist`,
+`bin`, `obj`, `.claude`, `__pycache__`, `.venv`, `venv`, `.obsidian` y `.trash`.
+
+### Los avisos del médico con una bóveda grande
+
+El médico está pensado para la memoria de Claude. En una bóveda con diarios, notas crudas y archivo, el aviso «Ninguna
+nota la nombra… Claude no la va a encontrar sola» sale por cientos de notas que están bien así. Para eso:
+
+- **`"huerfanas": false` en la fuente** (como en el ejemplo): sus notas no dan ese aviso, no cuentan en «N de M notas no
+  se alcanzan» y no aparecen entre las huérfanas de Salud. Siguen sirviendo de camino para llegar a otras notas.
+- **`"registro": true` en una fuente de diarios o actas:** sus enlaces rotos no se marcan, porque nombran cosas que ya
+  cambiaron.
+- **`"historico": true` en una fuente de archivo:** el médico no les revisa rutas, enlaces ni anclas, porque son viejas
+  a propósito.
+
+Si algo de tu bóveda no se lee bien, abrí un issue: estas mejoras salieron de los issues
+[#2](https://github.com/lumiel777/neuromapa/issues/2) y [#3](https://github.com/lumiel777/neuromapa/issues/3), que
+reportó iwoyeri con una bóveda de 1.068 notas.

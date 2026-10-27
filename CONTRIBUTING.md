@@ -41,7 +41,10 @@ Para ver el mapa con notas inventadas: `sh bin/neuromapa abrir --demo`, o `bin\n
 ## Commits y pull requests
 
 - Un commit por cambio. El mensaje dice qué estaba mal y por qué el cambio lo arregla, y cómo lo probaste.
-- Si el cambio arregla un error, sumá una prueba a `herramientas/prueba_humo.py` que falle sin el arreglo.
+- Si el cambio arregla un error, sumá una prueba que falle sin el arreglo. Las pruebas están en `herramientas/humo/`,
+  una parte por tema (`ordenar_notas.py`, `busqueda.py`…, y lo común en `base.py`); `herramientas/prueba_humo.py` es la
+  entrada que las corre en orden. Una prueba nueva va en la función `revisar_…` de su tema, o en una nueva que se suma a
+  la lista de `main`.
 
 ## Sacar una versión
 

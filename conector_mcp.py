@@ -38,14 +38,24 @@ HERRAMIENTAS = [
                                                       "hasta": {"type": "integer", "minimum": 1}},
                      "required": ["ruta"]}},
     {"name": "avisar_charla",
-     "description": "Solo para el modo Chat de la app de escritorio: llamala una sola vez al empezar cada charla, antes de "
-                    "responder, y le avisa a Neuromapa que hay una charla nueva para mostrarla en el mapa del usuario. En "
-                    "Claude Code no hace falta (sus hooks ya la anotan). No recibe ni devuelve texto de la charla ni de "
-                    "las notas.",
+     "description": "Para las charlas que Neuromapa no ve solo (el modo Chat de la app de escritorio de Claude, Codex): "
+                    "llamala una sola vez al empezar cada charla, antes de responder, y le avisa a Neuromapa que hay una "
+                    "charla nueva para mostrarla en el mapa del usuario. En Claude Code no hace falta (sus hooks ya la "
+                    "anotan). No recibe ni devuelve texto de la charla ni de las notas.",
      "inputSchema": {"type": "object", "properties": {}}},
 ]
+INSTRUCCIONES = {
+    "app": "Neuromapa da acceso de solo lectura a las notas de memoria del usuario. En el modo Chat de la app, al empezar "
+           "cada charla llamá una vez a «avisar_charla» (no lleva ni devuelve texto): así el usuario la ve en su mapa. En "
+           "Claude Code no la llames: sus hooks ya anotan la charla. Antes de responder sobre un tema del que pueda haber "
+           "notas, usá «sobre»; para el texto completo, «leer_nota».",
+    "codex": "Neuromapa da acceso de solo lectura a las notas de memoria del usuario (las que escribe con Claude Code y sus "
+             "documentos). Al empezar cada charla llamá una vez a «avisar_charla» (no lleva ni devuelve texto): así el "
+             "usuario la ve en su mapa. Antes de trabajar sobre un tema del que pueda haber notas, usá «sobre»; para el "
+             "texto completo, «leer_nota».",
+}
 _indice = {"t": 0, "valor": None}
-_estado = {"sesion": "app" + secrets.token_hex(2), "inicio": 0.0}
+_estado = {"sesion": "app" + secrets.token_hex(2), "inicio": 0.0, "origen": "app"}
 _pendientes = queue.Queue()
 
 
@@ -96,13 +106,14 @@ def anotar(nombre, tipo, opcion="", rutas=(), ruta="", fase="post", nueva=False)
     desde = _estado["inicio"]
 
     def tarea():
-        if de_claude_code(nombre or "avisar_charla", desde):
+        origen = _estado["origen"]
+        if origen == "app" and de_claude_code(nombre or "avisar_charla", desde):
             return
         if nueva:
-            _estado["sesion"] = "app" + secrets.token_hex(2)
+            _estado["sesion"] = origen + secrets.token_hex(2)
         import hook_evento
         evento = {"t": round(time.time(), 3), "s": _estado["sesion"], "e": fase, "h": "neuromapa_" + nombre if nombre else "",
-                  "k": tipo, "o": "app"}
+                  "k": tipo, "o": origen}
         if opcion:
             evento["p"] = opcion
         seguras = [hook_evento.corto(r, 300) for r in rutas if hook_evento.ruta_guardable(r)][:hook_evento.MAXIMO_RUTAS]
@@ -200,6 +211,9 @@ def llamar(params):
     try:
         with contextlib.redirect_stdout(sys.stderr):
             texto = FUNCIONES[nombre](argumentos)
+            if nombre != "avisar_charla":
+                import charlas
+                texto = charlas.tapar_claves(texto, charlas.secretos_propios())
     except PedidoInvalido as error:
         return {"content": [{"type": "text", "text": f"No pude: {error}."}], "isError": True}
     except Exception as error:
@@ -208,16 +222,21 @@ def llamar(params):
     return {"content": [{"type": "text", "text": texto if nombre == "avisar_charla" else AVISO + "\n\n" + texto}]}
 
 
+def origen_de(params):
+    cliente = params.get("clientInfo")
+    nombre = cliente.get("name") if isinstance(cliente, dict) else None
+    return "codex" if isinstance(nombre, str) and "codex" in nombre.lower() else "app"
+
+
 def iniciar(params):
     import cerebro
     pedida = params.get("protocolVersion")
+    origen = origen_de(params)
+    if origen != _estado["origen"]:
+        _estado["origen"], _estado["sesion"] = origen, origen + secrets.token_hex(2)
     return {"protocolVersion": pedida if pedida in VERSIONES else VERSIONES[0], "capabilities": {"tools": {}},
             "serverInfo": {"name": "neuromapa", "version": cerebro.version()},
-            "instructions": "Neuromapa da acceso de solo lectura a las notas de memoria del usuario. En el modo Chat de la "
-                            "app, al empezar cada charla llamá una vez a «avisar_charla» (no lleva ni devuelve texto): así el "
-                            "usuario la ve en su mapa. En Claude Code no la llames: sus hooks ya anotan la charla. Antes de "
-                            "responder sobre un tema del que pueda haber notas, usá «sobre»; para el texto completo, "
-                            "«leer_nota»."}
+            "instructions": INSTRUCCIONES[origen]}
 
 
 def atender(pedido):

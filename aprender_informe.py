@@ -1,12 +1,13 @@
+import math
 import time
 
 import configuracion
 from archivos import leer_objeto_json
 from registro import numero
-from textos import cantidad
+from textos import cantidad, decimal
 
 from aprender_comun import (APOYO, ARCHIVO, ARISTAS_MAPA, CAMPOS_DIA, DIAS, FUERZA_MAPA, MOSTRAR, MOSTRAR_DETALLE,
-                            VERSION, VIDA_MEDIA, clave, decimal, dia_de, en_vivo, es_nota, es_temporal, prendido)
+                            VERSION, VIDA_MEDIA, clave, dia_de, en_vivo, es_nota, es_temporal, prendido)
 from aprender_pista import cargar
 
 COMPARAR_MINIMO = 30
@@ -46,7 +47,39 @@ def linea_separada(suma):
             f'{de_cada(suma["seguidas"] - suma["seguidas_ap"], suma["notas"] - suma["notas_ap"])}.')
 
 
+def margen(x1, n1, x2, n2):
+    p1, p2 = x1 / n1, x2 / n2
+    return 100 * (p1 - p2), 196 * math.sqrt(p1 * (1 - p1) / n1 + p2 * (1 - p2) / n2)
+
+
+def linea_justa(dias, hoy=None):
+    suma = resumen_dias(dias, DIAS, hoy)
+    n1, x1, n2, x2 = suma["medidas_con"], suma["sirvio_con"], suma["medidas_sa"], suma["sirvio_sa"]
+    if not n1 or not n2:
+        return ""
+    diferencia, error = margen(x1, n1, x2, n2)
+    if min(n1, n2) < COMPARAR_MINIMO:
+        veredicto = "todavía son pocas para decir algo"
+    elif abs(diferencia) <= error:
+        veredicto = "todavía no se puede decir que ayude"
+    else:
+        veredicto = "ayuda" if diferencia > 0 else "va peor que sin lo aprendido"
+    texto = (f"Comparación justa (sin contar lo que suma lo aprendido, que agrega cosas a cada pista; una pista sirvió si "
+             f"Claude leyó una nota o abrió un archivo de ella): con lo aprendido sirvieron {de_cada(x1, n1)}, sin lo "
+             f"aprendido {de_cada(x2, n2)}; la diferencia es de {round(diferencia):+d} puntos, ± {round(error)}: "
+             f"{veredicto}.")
+    if suma["ap_nuevos"]:
+        texto += (f" De lo que sumó lo aprendido y la charla todavía no había tocado, se abrió "
+                  f"{de_cada(suma['ap_nuevos_vistos'], suma['ap_nuevos'])}.")
+    if min(n1, n2) < COMPARAR_MINIMO:
+        texto += f" Hacen falta {COMPARAR_MINIMO} de cada lado (se cuenta desde que se mide así)."
+    return texto
+
+
 def linea_comparacion(dias, hoy=None):
+    justa = linea_justa(dias, hoy)
+    if justa:
+        return justa
     activos = sorted(f for f, c in dias.items() if numero(c.get("pistas_sa")))
     if not activos:
         return ""
@@ -62,7 +95,8 @@ def linea_comparacion(dias, hoy=None):
                suma["notas"] - suma["notas_sa"])
     sin_lo = lado(sin, suma["utiles_sa"], suma["seguidas_sa"], suma["notas_sa"])
     texto = (f"Comparación (algunos pedidos van sin lo aprendido; una pista sirvió si Claude leyó una nota o abrió un archivo "
-             f"de ella): con lo aprendido, {con}; sin lo aprendido, {sin_lo}.")
+             f"de ella): con lo aprendido, {con}; sin lo aprendido, {sin_lo}. Ojo: con lo aprendido la pista trae más "
+             f"cosas y cuenta también lo que sumó, así que esta cuenta lo favorece.")
     if sin < COMPARAR_MINIMO:
         texto += (f" Todavía son pocas para sacar una conclusión: {cantidad(sin, 'pista', 'pistas')} sin lo aprendido, "
                   f"hacen falta {COMPARAR_MINIMO}.")
@@ -97,7 +131,7 @@ def texto(aprendido, dias, ruta, hoy=None):
     pares = aprendido.pares()
     if pares:
         lineas.append("Se usan juntos (más fuerte primero):")
-        lineas += [f"  {decimal(f)}  {aprendido.visible(a)} ↔ {aprendido.visible(b)}" for f, a, b in pares[:MOSTRAR]]
+        lineas += [f"  {decimal(f, 2)}  {aprendido.visible(a)} ↔ {aprendido.visible(b)}" for f, a, b in pares[:MOSTRAR]]
     notas = sorted((c for c in aprendido.veces if es_nota(c)), key=lambda c: -aprendido.veces[c])
     codigo = [(n, aprendido.vecinos(n, lambda b: not es_nota(b) and not es_temporal(b), respaldo=False)[:3]) for n in notas]
     codigo = [(n, v) for n, v in codigo if v][:MOSTRAR]
@@ -127,7 +161,7 @@ def para_la_pagina(nodos, hoy=None):
             break
         if a in por_clave and b in por_clave and por_clave[a] != por_clave[b]:
             aristas.append({"de": por_clave[a], "a": por_clave[b], "clase": "aprendida", "peso": round(f, 2),
-                            "texto": f"se usan juntas en el trabajo (fuerza {decimal(f)})"})
+                            "texto": f"se usan juntas en el trabajo (fuerza {decimal(f, 2)})"})
 
     def lugar(c):
         return {"texto": aprendido.visible(c), "id": por_clave.get(c)}
@@ -196,7 +230,7 @@ def detalle(aprendido, c):
     propios = aprendido.vecinos(c, respaldo=False)
     if propios:
         lineas.append("Se usa junto con (más fuerte primero):")
-        lineas += [f"  {decimal(f)}  {aprendido.corto(b)}" for f, b in propios[:MOSTRAR_DETALLE]]
+        lineas += [f"  {decimal(f, 2)}  {aprendido.corto(b)}" for f, b in propios[:MOSTRAR_DETALLE]]
         if len(propios) > MOSTRAR_DETALLE:
             lineas.append(f"  y {len(propios) - MOSTRAR_DETALLE} más")
     else:
@@ -208,7 +242,7 @@ def detalle(aprendido, c):
     viejos = aprendido.viejo.vecinos(c)
     if viejos:
         lineas.append("De las charlas guardadas de antes (solo de respaldo, si del registro no aprendió nada):")
-        lineas += [f"  {decimal(f)}  {aprendido.corto(b)}" for f, b in viejos[:MOSTRAR_DETALLE]]
+        lineas += [f"  {decimal(f, 2)}  {aprendido.corto(b)}" for f, b in viejos[:MOSTRAR_DETALLE]]
     par = aprendido.pistas.get(c)
     if par and par[0] >= 1:
         lineas.append(f"Cuando la pista la recomendó, se leyó después {round(10 * par[1] / par[0])} de cada 10 veces.")

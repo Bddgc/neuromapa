@@ -560,7 +560,7 @@ def aviso(sesion, cwd, notas, codigo, notas_aprendidas=(), codigo_aprendido=(), 
               "k": "aviso"}
     if ruta_guardable(cwd):
         evento["c"] = corto(cwd, 200)
-    for campo, rutas, largo in (("fs", notas, 300), ("fc", codigo, 120), ("na", notas_aprendidas, 300),
+    for campo, rutas, largo in (("fs", notas, 300), ("fc", codigo, 300), ("na", notas_aprendidas, 300),
                                 ("ca", codigo_aprendido, 300)):
         rutas = [corto(r, largo) for r in rutas if ruta_guardable(r)][:MAXIMO_RUTAS]
         if rutas:

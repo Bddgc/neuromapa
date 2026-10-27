@@ -7,7 +7,7 @@ import time
 
 import permisos
 from archivos import dentro, escribir_atomico, hay_candados, leer_objeto_json, soltar_candado, tomar_candado
-from textos import citar
+from textos import citar, recortar
 
 ARCHIVO = "problemas.json"
 AVISADOS = os.path.join("en-vivo", "avisados.json")
@@ -19,6 +19,8 @@ MOSTRAR = 4
 LARGO_CITA = 120
 ESPERA_CANDADO = 0.5
 REGLAS_YA_EN_SALUD = ("sinIndice", "indiceRoto", "enlaceRoto")
+ARREGLADOS_DIAS = 30
+ARREGLADOS_TOPE = 200
 
 
 def listar(datos, memorias, raices):
@@ -74,13 +76,6 @@ def listar(datos, memorias, raices):
     return salida
 
 
-def recortar(texto, largo):
-    texto = " ".join(str(texto).split())
-    if len(texto) > largo:
-        texto = texto[:largo - 1].rstrip() + "…"
-    return texto + "»" if texto.count("«") > texto.count("»") else texto
-
-
 def leer(ruta):
     return leer_objeto_json(ruta)
 
@@ -89,15 +84,48 @@ def escribir(ruta, datos):
     escribir_atomico(ruta, json.dumps(datos, ensure_ascii=False, separators=(",", ":")))
 
 
-def guardar(problemas, carpeta, ahora=None):
+def por_nota(lista):
+    cuenta = {}
+    for p in lista:
+        if isinstance(p, dict) and p.get("ruta") and p.get("clave"):
+            llave = (str(p["clave"]).split("|", 1)[0], p["ruta"])
+            cuenta[llave] = cuenta.get(llave, 0) + 1
+    return cuenta
+
+
+def anotar_arreglados(previos, problemas, arreglados, vivas, ahora):
+    lista = [a for a in arreglados if isinstance(a, dict) and isinstance(a.get("t"), (int, float))
+             and ahora - a["t"] < ARREGLADOS_DIAS * 86400]
+    antes, despues = por_nota(previos), por_nota(problemas)
+    for (tipo, ruta), n in despues.items():
+        volvieron = n - antes.get((tipo, ruta), 0)
+        for i in range(len(lista) - 1, -1, -1):
+            if volvieron <= 0:
+                break
+            if lista[i].get("tipo") == tipo and lista[i].get("ruta") == ruta:
+                del lista[i]
+                volvieron -= 1
+    if vivas is not None:
+        for (tipo, ruta), n in sorted(antes.items()):
+            if ruta in vivas:
+                lista += [{"t": ahora, "ruta": ruta, "tipo": tipo}] * max(0, n - despues.get((tipo, ruta), 0))
+    return lista[-ARREGLADOS_TOPE:]
+
+
+def guardar(problemas, carpeta, ahora=None, vivas=None):
     ahora = time.time() if ahora is None else ahora
     ruta = os.path.join(carpeta, ARCHIVO)
     primera = not os.path.isfile(ruta)
-    antes = {p.get("clave"): p.get("desde") for p in leer(ruta).get("problemas", []) if isinstance(p, dict)}
+    guardado = leer(ruta)
+    previos = [p for p in guardado.get("problemas", []) if isinstance(p, dict)]
+    antes = {p.get("clave"): p.get("desde") for p in previos}
     for p in problemas:
         desde = antes.get(p["clave"])
         p["desde"] = desde if isinstance(desde, (int, float)) else (0 if primera else ahora)
-    escribir(ruta, {"generado": ahora, "problemas": problemas})
+    viejos = guardado.get("arreglados") if isinstance(guardado.get("arreglados"), list) else []
+    arreglados = anotar_arreglados(previos, problemas, viejos, None if primera else vivas, ahora)
+    escribir(ruta, {"generado": ahora, "problemas": problemas, "arreglados": arreglados})
+    return arreglados
 
 
 def hace_falta_refrescar(carpeta, ahora):

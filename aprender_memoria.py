@@ -1,11 +1,11 @@
 import zlib
 
-from registro import numero
+from registro import numero, sin_lecturas
 
-from aprender_comun import (CAMPOS_DIA, DESPUES_DE_PISTA, DIAS, HUECO, MINIMO, MISMO_PEDIDO, OLVIDOS, PARES, PESO_PISTA,
-                            PESO_PROPIO, PISTAS_ABIERTAS, RE_WORKTREE, SEGUIR, TOQUES, VECINOS, VENTANA, VERSION,
-                            VIDA_MEDIA, VISTOS, clave, dia_de, es_de_codigo, es_nota, es_numero, nombre, numeros,
-                            proyecto_de, raices, rutas_de, tabla, textos, util)
+from aprender_comun import (CAMPOS_DIA, DECIMALES, DESPUES_DE_PISTA, DIAS, HUECO, MINIMO, MISMO_PEDIDO, OLVIDOS, PARES,
+                            PESO_PISTA, PESO_PROPIO, PISTAS_ABIERTAS, RE_WORKTREE, SEGUIR, TOQUES, VECINOS_GUARDADOS,
+                            VENTANA, VERSION, VIDA_CHARLA, VIDA_MEDIA, VISTOS, VISTOS_CHARLA, clave, dia_de, es_de_codigo,
+                            es_nota, es_numero, nombre, numeros, proyecto_de, raices, rutas_de, tabla, textos, util)
 
 
 def abierto_valido(v):
@@ -38,7 +38,17 @@ def olvidos_validos(valor):
 def pendiente_valido(v):
     return isinstance(v, dict) and es_numero(v.get("t")) \
         and all(textos(v.get(k)) for k in ("notas", "codigo", "leidas", "vistos", "despues")) \
-        and all(textos(v.get(k, [])) for k in ("notas_ap", "codigo_ap", "vistos_ap"))
+        and all(textos(v.get(k, [])) for k in ("notas_ap", "codigo_ap", "vistos_ap", "ap_nuevos"))
+
+
+def huella_de(c):
+    return zlib.crc32(c.encode("utf-8"))
+
+
+def vio_valido(valor):
+    return {s: [float(v[0]), [x for x in v[1] if isinstance(x, int) and not isinstance(x, bool)][-VISTOS_CHARLA:]]
+            for s, v in tabla(valor).items()
+            if isinstance(v, list) and len(v) == 2 and es_numero(v[0]) and isinstance(v[1], list)}
 
 
 def lazos_validos(valor):
@@ -52,8 +62,8 @@ def veces_validas(valor):
 def podar_lazos(lazos, veces):
     for a in list(lazos):
         vecinos = {b: w for b, w in lazos[a].items() if w >= MINIMO}
-        if len(vecinos) > VECINOS:
-            vecinos = dict(sorted(vecinos.items(), key=lambda x: -x[1])[:VECINOS])
+        if len(vecinos) > VECINOS_GUARDADOS:
+            vecinos = dict(sorted(vecinos.items(), key=lambda x: -x[1])[:VECINOS_GUARDADOS])
         if vecinos:
             lazos[a] = vecinos
         else:
@@ -62,8 +72,8 @@ def podar_lazos(lazos, veces):
 
 
 def redondear(lazos, veces):
-    return ({a: {b: round(w, 4) for b, w in v.items()} for a, v in lazos.items()},
-            {c: round(w, 4) for c, w in veces.items()})
+    return ({a: {b: round(w, DECIMALES) for b, w in v.items()} for a, v in lazos.items()},
+            {c: round(w, DECIMALES) for c, w in veces.items()})
 
 
 class Memoria:
@@ -92,6 +102,7 @@ class Memoria:
         self.pares = {k: set(v.get("pares", [])) for k, v in self.abiertos.items()}
         self.charlas = charlas_validas(datos.get("charlas"))
         self.proyectos = lazos_validos(datos.get("proyectos"))
+        self.vio = vio_valido(datos.get("vio"))
         self.raices = None
         self.contar = True
         self.ahora = self.hecho
@@ -173,10 +184,12 @@ class Memoria:
             return
         fase = ev.get("e", "post")
         a = str(ev.get("a") or "")
-        if fase in ("usuario", "aviso") and not a:
+        ciego = sin_lecturas(ev)
+        if fase in ("usuario", "aviso") and not a and not ciego:
             self.empezar(s, t)
         if fase == "aviso" or (fase == "post" and ev.get("k") == "consulta" and ev.get("p") == "sobre"):
-            self.pista(s, t, ev)
+            if not ciego:
+                self.pista(s, t, ev)
             return
         if fase != "post" or ev.get("k") not in TOQUES:
             return
@@ -197,6 +210,11 @@ class Memoria:
         if not util(c) or self.olvidado(t, c):
             return
         self.rutas[c] = RE_WORKTREE.sub("", ruta, count=1)
+        vio = self.vio.setdefault(s, [t, []])
+        vio[0] = max(vio[0], t)
+        marca = huella_de(c)
+        if marca not in vio[1]:
+            vio[1] = (vio[1] + [marca])[-VISTOS_CHARLA:]
         p = self.peso(t)
         k = f"{s}|{a}"
         abierto = self.abiertos.get(k)
@@ -256,7 +274,7 @@ class Memoria:
             return [r for r in ev[campo][:5] if isinstance(r, str)] if isinstance(ev.get(campo), list) else []
 
         codigo_ap = list(dict.fromkeys(clave(r) for r in lista("ca")))
-        codigo = list(dict.fromkeys(nombre(clave(r)) for r in lista("fc")))
+        codigo = list(dict.fromkeys(c if "/" in c else nombre(c) for c in map(clave, lista("fc"))))
         notas_ap = [clave(r) for r in lista("na")]
         notas = []
         for ruta in lista("fs"):
@@ -268,8 +286,11 @@ class Memoria:
             return
         abiertas = self.pendientes.setdefault(s, [])
         sin = 1 if ev.get("sa") == 1 else 0
+        notas_ap = [c for c in notas_ap if c in notas]
+        ya_vistos = set(self.vio.get(s, [0, []])[1])
+        nuevos = [c for c in codigo_ap + notas_ap if huella_de(c) not in ya_vistos]
         abiertas.append({"t": t, "notas": notas, "codigo": codigo, "leidas": [], "vistos": [], "despues": [],
-                         "notas_ap": [c for c in notas_ap if c in notas], "codigo_ap": codigo_ap, "vistos_ap": [], "sa": sin})
+                         "notas_ap": notas_ap, "codigo_ap": codigo_ap, "vistos_ap": [], "sa": sin, "ap_nuevos": nuevos})
         while len(abiertas) > PISTAS_ABIERTAS:
             self.cerrar_pista(abiertas.pop(0))
         self.dia(t)["pistas"] += 1
@@ -283,13 +304,15 @@ class Memoria:
             if t - numero(pendiente.get("t")) > SEGUIR:
                 abiertas.remove(pendiente)
                 self.cerrar_pista(pendiente)
-                continue
+        la_ultima = next((p for p in reversed(abiertas) if c in p["notas"]), None)
+        for pendiente in abiertas:
             if c in pendiente["notas"]:
-                if c not in pendiente["leidas"]:
+                if pendiente is la_ultima and c not in pendiente["leidas"]:
                     pendiente["leidas"].append(c)
                 continue
-            if nombre(c) in pendiente["codigo"] and nombre(c) not in pendiente["vistos"]:
-                pendiente["vistos"].append(nombre(c))
+            llave = c if c in pendiente["codigo"] else nombre(c)
+            if llave in pendiente["codigo"] and llave not in pendiente["vistos"]:
+                pendiente["vistos"].append(llave)
             if c in pendiente.get("codigo_ap", ()) and c not in pendiente.setdefault("vistos_ap", []):
                 pendiente["vistos_ap"].append(c)
             if c not in pendiente["despues"] and c not in pendiente.get("codigo_ap", ()) \
@@ -330,6 +353,12 @@ class Memoria:
             dia["codigo_ap_visto"] += len(codigo_ap & set(pendiente.get("vistos_ap", ())))
             util = 1 if pendiente["leidas"] or pendiente["vistos"] or pendiente.get("vistos_ap") else 0
             dia["utiles"] += util
+            rama = "sa" if pendiente.get("sa") else "con"
+            dia[f"medidas_{rama}"] += 1
+            dia[f"sirvio_{rama}"] += 1 if set(pendiente["leidas"]) - notas_ap or pendiente["vistos"] else 0
+            nuevos = set(pendiente.get("ap_nuevos", ()))
+            dia["ap_nuevos"] += len(nuevos)
+            dia["ap_nuevos_vistos"] += len(nuevos & (set(pendiente["leidas"]) | set(pendiente.get("vistos_ap", ()))))
             if pendiente.get("sa"):
                 dia["utiles_sa"] += util
                 dia["notas_sa"] += len(pendiente["notas"])
@@ -351,6 +380,7 @@ class Memoria:
             if hasta - numero(abierto.get("t")) > HUECO:
                 del self.abiertos[k]
                 self.pares.pop(k, None)
+        self.vio = {s: v for s, v in self.vio.items() if hasta - v[0] <= VIDA_CHARLA}
 
     def podar(self):
         self.veces = podar_lazos(self.lazos, self.veces)
@@ -372,10 +402,12 @@ class Memoria:
         viejo_lazos, viejo_veces = redondear(self.viejo_lazos, self.viejo_veces)
         return {"version": VERSION, "hecho": round(self.hecho, 3), "hasta": round(self.hasta, 3),
                 "lazos": lazos, "veces": veces, "viejo": {"lazos": viejo_lazos, "veces": viejo_veces},
-                "pistas": {c: [round(x, 4) for x in par] for c, par in self.pistas.items()},
-                "codigo": {c: [round(x, 4) for x in par] for c, par in self.codigo.items()},
+                "pistas": {c: [round(x, DECIMALES) for x in par] for c, par in self.pistas.items()},
+                "codigo": {c: [round(x, DECIMALES) for x in par] for c, par in self.codigo.items()},
                 "rutas": self.rutas, "pendientes": self.pendientes, "dias": self.dias, "charlas": self.charlas,
-                "proyectos": {chat: {p: round(w, 4) for p, w in cuenta.items()} for chat, cuenta in self.proyectos.items()},
+                "proyectos": {chat: {p: round(w, DECIMALES) for p, w in cuenta.items()}
+                              for chat, cuenta in self.proyectos.items()},
                 "abiertos": {k: dict(v, pares=sorted(self.pares.get(k, ()))) for k, v in self.abiertos.items()},
+                "vio": {s: [round(v[0], 3), v[1]] for s, v in self.vio.items()},
                 "olvidos": {tipo: {c: round(t, 3) for c, t in sorted(cuales.items(), key=lambda x: -x[1])[:OLVIDOS]}
                             for tipo, cuales in self.olvidos.items()}}

@@ -10,10 +10,28 @@ hands Claude what it already knows before it goes looking again.
 
 ![Neuromapa with the demo's sample notes](docs/neuromapa.gif)
 
+## Get started in a minute
+
+You need [Python](https://www.python.org/downloads/) 3.10 or newer and [git](https://git-scm.com/downloads).
+
+1. Install it:
+
+   ```
+   claude plugin marketplace add lumiel777/neuromapa
+   claude plugin install neuromapa@neuromapa
+   ```
+
+2. Close Claude Code and open it again: the plugin only loads then.
+3. In a Claude Code session, type `/neuromapa:abrir`. The map of your notes opens. If you don't have notes yet,
+   `/neuromapa:abrir --demo` shows one with sample notes.
+
+On the map, `?` explains what everything is. More in [Install](#install) and in the
+[wiki](https://github.com/lumiel777/neuromapa/wiki/English).
+
 ## What it does
 
 - **A map of your notes.** It gathers Claude Code's memory (`~/.claude/projects/*/memory/`), your `CLAUDE.md` files and
-  any documents you choose, and draws them as a brain: every note is a neuron, and every time a note names another,
+  any documents you choose, and draws them as a brain: every note is a shape, and every time a note names another,
   a connection.
 - **Live.** While Claude works you see which note it reads, which file it edits, which agent it launched, and in which chat.
   At the bottom, the timeline shows the last 10 minutes with one line per chat: everything it did, when you wrote to
@@ -38,13 +56,19 @@ hands Claude what it already knows before it goes looking again.
   you don't want (or everything about a file). Each install learns on its own computer, from its own use, and starts out knowing
   something from the chats Claude Code had already saved.
 - **Automatic warnings.** When Claude creates a memory similar to an existing one, when two chats edit the same file,
-  when it writes a link in a note to a note that doesn't exist, and when a new problem shows up in your notes.
+  when it writes a link in a note to a note that doesn't exist, when it leaves an overly long line in the index
+  (`MEMORY.md`), and when a new problem shows up in your notes.
+- **What it did for you.** The «Lo que hizo por vos» block, top left of the map: over the last 7 days, how many hints
+  it gave Claude, how many helped, how many recommended notes Claude read and which problems found by the doctor got
+  fixed.
 - **Optional:** automatic context, which hands Claude the most useful bits of your notes on every request and, when it
   edits a code file, tells it which note is usually read with it if it hasn't read it yet (turned on in the plugin's
   [options](#options)); a brake that asks before launching agents once a chat's agents have used many tokens in the
   last hour (turned on in `config.json`); and a connector for the Chat mode of the Claude desktop app, where hooks
   don't run: it gives those chats read-only access to your notes and shows them on the map (see
-  [how it works](docs/como-funciona.md#conector-para-la-app-de-escritorio-de-claude-opcional), in Spanish).
+  [how it works](docs/como-funciona.md#conector-para-la-app-de-escritorio-de-claude-opcional), in Spanish). The same
+  connector works for Codex, which with a hook also gets the hint on every request (see
+  [Codex](docs/como-funciona.md#codex-opcional), in Spanish).
 
 ## What was measured
 
@@ -84,7 +108,7 @@ claude plugin install neuromapa@neuromapa
 
 Or, inside a Claude Code session: `/plugin marketplace add lumiel777/neuromapa`, then `/plugin install neuromapa@neuromapa`.
 
-The first time you open Claude Code after installing it, Neuromapa says it is installed and how to open the map.
+Then close Claude Code and open it again: the hooks and the `/neuromapa:…` commands only load then. The first time you open Claude Code after installing it, Neuromapa says it is installed and how to open the map.
 If Python is missing, it says so when Claude Code starts and does nothing until you install it. If Claude Code
 says on install that 2 options are not set («userConfig options not yet set»), that is expected: both have defaults
 and you can change them any time (see [Options](#options)).
@@ -107,6 +131,7 @@ learned stay as they were.
 | Open the live map | `/neuromapa:abrir` |
 | What is known about a topic | `/neuromapa:sobre weather forecast` |
 | Check the memory | `/neuromapa:salud` |
+| Check that the install works | Ask Claude to run `neuromapa chequeo`: it says what is missing in plain words |
 | Try it with made-up notes | `/neuromapa:abrir --demo` (see [demo/LEEME.md](demo/LEEME.md), in Spanish) |
 
 While the plugin is enabled, Claude also has the `neuromapa` command in its shell (`neuromapa --help` lists
@@ -156,7 +181,9 @@ writes to the memory on its own. When it finds a problem it tells Claude, and it
   inside the data folder. `/neuromapa:abrir` starts the map's server and opens your browser. The search index and the
   problem list are rebuilt in the background with the same Python. Sleeping with Claude, if you turn it on, runs your
   `claude`. `herramientas/bajar_librerias.py` downloads d3 and marked from `cdn.jsdelivr.net`, but it is for whoever
-  maintains the project: no hook runs it. The code in `demo/` belongs to made-up projects and is never run.
+  maintains the project: no hook runs it. The code in `demo/` belongs to made-up projects and is never run. If you add
+  the connector to the desktop app or to Codex, they run `conector_mcp.py` with your Python, and Codex also runs
+  `hook_servir.py` if you add the hook.
 - **It only changes a note if you approve it:** the nightly pass proposes fixes and `--aplicar` changes only the ones
   you pick. `--partir` (move the old part of a long note into another note) and `--renombrar` (rename a note and
   whatever names it in the memory) first show the plan and only do it with that plan's code (`--confirmar`); before
@@ -164,9 +191,11 @@ writes to the memory on its own. When it finds a problem it tells Claude, and it
   write to your notes. The one exception is something you turn on: with `partir_sola` in `config.json`, the daily pass
   splits a memory that is about to fill up by itself: it moves its oldest entries into a history note or, if it has no
   dates, its second half into a "part 2" note. It does so with the same backup and without losing a line, logs it in
-  `respaldos/partidas.log` and tells Claude about it. If the note was being edited, it tries again half an hour later
-  with a background process of the same Python (see [how it works](docs/como-funciona.md), in Spanish). It is off by
-  default.
+  `respaldos/partidas.log` and tells Claude about it. The same switch also looks after the index: if a note has its
+  history notes on separate lines of `MEMORY.md`, it joins them into one line, without changing what each one says or
+  losing a link, with the same backup and the same notice. If the note or the index was being edited, it tries again
+  half an hour later with a background process of the same Python (see [how it works](docs/como-funciona.md), in
+  Spanish). It is off by default.
 - **Rules and skills, only if you confirm them:** `--reglas` and `--recetas` suggest turning a memory into a
   path-scoped rule or a recipe into a skill, and are read-only. `--regla` and `--receta` show the text and, only with
   that text's code (`--confirmar`), write one file outside the memory: in the project's `.claude/rules/` or
@@ -200,7 +229,9 @@ writes to the memory on its own. When it finds a problem it tells Claude, and it
   from there. `--sobre` and `--buscar` with `--al DATE` answer with the memory as it was that day: to do so they copy
   that version to your account's temp folder and delete it when done. `--cambios` and the “cambió el…” notice in
   `--sobre` only read that history to compare versions: they store nothing.
-- Whatever Claude reads from Neuromapa goes to Anthropic, like any file Claude opens.
+- Whatever Claude reads from Neuromapa goes to Anthropic, like any file Claude opens. If you connect it to Codex,
+  whatever Codex reads (and the hint on every request, if you add the hook) goes to OpenAI; anything shaped like a
+  key comes out masked.
 - **The data folder must be yours alone**, not a shared folder or the root of a drive other accounts on the PC use:
   whoever can write there can change what Neuromapa passes to Claude. The folders Neuromapa creates start closed to your
   account, and `/neuromapa:salud` warns (with the command to close it) if another account can write to the data folder
@@ -235,4 +266,5 @@ are in [CHANGELOG.md](CHANGELOG.md) (in Spanish).
 
 ## License
 
-[MIT](LICENSE). It ships d3 (ISC) and marked (MIT) unchanged: see [vendor/LICENCIAS.md](vendor/LICENCIAS.md).
+[MIT](LICENSE). It ships, unchanged, the d3 modules the page uses (ISC; `d3-ease`, BSD) and marked (MIT): see
+[vendor/LICENCIAS.md](vendor/LICENCIAS.md).

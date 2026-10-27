@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 import archivos
+import procesos
 from archivos import dentro
 from textos import citar
 
@@ -119,9 +120,8 @@ def llamar(claude, pedido, esquema, modelo, tope, herramientas="", carpetas=(), 
     entorno["NEUROMAPA_PRUEBA"] = "1"
     with tempfile.TemporaryDirectory(prefix="neuromapa-dormir-") as vacia:
         try:
-            proceso = subprocess.run(orden, input=pedido, cwd=vacia, env=entorno, capture_output=True, text=True,
-                                     encoding="utf-8", errors="replace", timeout=ESPERA_LLAMADA,
-                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            proceso = procesos.correr(orden, timeout=ESPERA_LLAMADA, input=pedido, cwd=vacia, env=entorno,
+                                      capture_output=True, text=True, encoding="utf-8", errors="replace")
         except subprocess.TimeoutExpired:
             return {"error": "Claude tardó demasiado en contestar", "gasto": tope}
         except OSError as error:

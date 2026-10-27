@@ -1,3 +1,4 @@
+import difflib
 import json
 import os
 import re
@@ -13,11 +14,31 @@ DEMO = CARPETA / "demo" / "config.json"
 BORRAR_REGISTROS_DIAS = 90
 TOPE_DORMIR = 20
 TOPE_COMPARAR = 0.5
+TOPE_INDICE_KB = 25
 PARTIR_SOLA = {"desde": 85, "hasta": 50, "dias_frescos": 3}
 LOBULOS = ("prefrontal", "frontal", "parietal", "occipital", "temporal", "cerebelo", "tronco")
-PODAR = ["node_modules", ".git", ".next", "dist", "bin", "obj", ".claude", "__pycache__", ".venv", "venv"]
+PODAR = ["node_modules", ".git", ".next", "dist", "bin", "obj", ".claude", "__pycache__", ".venv", "venv", ".obsidian",
+         ".trash"]
 EXCLUIR_FRAGMENTOS = ["\\.claude\\worktrees", "node_modules", "\\.git\\", "\\.next\\", "\\dist\\", "\\bin\\", "\\obj\\",
                       "__pycache__"]
+SI_O_NO_FUENTE = ("memoria", "foco", "historico", "registro", "planes_vigentes", "anclas_resumidas", "huerfanas")
+CLAVES = {
+    "arriba": ("usuario", "fuentes", "proyectos", "lobulos", "alias_rutas", "podar", "podar_si_contiene",
+               "excluir_fragmentos", "excluir_claude_bajo", "carpetas_pesadas", "prefijos_tabla", "handoffs", "freno",
+               "dormir_con_claude", "partir_sola", "indice_meta_kb", "borrar_registros_dias", "aprender",
+               "ordenar_con_preguntas", "comparar_aprendido", "sensibles"),
+    "fuente": ("id", "nombre", "color", "raices", "patron", "excluir", "proyecto", "peso_busqueda", "prioridad", "lobulo",
+               "ancla") + SI_O_NO_FUENTE,
+    "raiz": ("ruta", "recursivo", "alias"),
+    "proyecto": ("raiz", "alias", "marca", "pistas", "extensiones", "codigo", "remite_a", "prefijo_carpeta", "nombre",
+                 "color", "marca_seccion", "aparte"),
+    "codigo": ("ruta", "marca"),
+    "handoffs": ("prefijo", "nombre", "lados"),
+    "lado": ("id", "nombre", "palabras"),
+    "freno": ("tokens_de_agentes_por_hora", "workflow_siempre"),
+    "dormir_con_claude": ("tope_usd_por_dia", "modelo"),
+    "pesada": ("contiene", "bajar_solo"),
+}
 
 
 class ConfigInvalida(ValueError):
@@ -48,6 +69,14 @@ def resolver(ruta, base):
     return str(camino if camino.is_absolute() else base / camino)
 
 
+def lista(valor, campo):
+    if valor is None:
+        return []
+    if not isinstance(valor, list):
+        raise ConfigInvalida(f"{campo} tiene que ser una lista, entre corchetes: [ … ]")
+    return valor
+
+
 def textos(valor, campo, minusculas=False):
     if valor is None:
         return []
@@ -63,23 +92,47 @@ def raiz_de(valor, campo, base):
         valor = [valor.get("ruta"), valor.get("recursivo", False), valor.get("alias", "")]
     if not isinstance(valor, list) or len(valor) != 3 or not isinstance(valor[0], str) or not valor[0]:
         raise ConfigInvalida(f"{campo} tiene que ser una ruta, o [ruta, recursivo, alias]")
-    return resolver(valor[0], base), bool(valor[1]), str(valor[2] or "")
+    if not isinstance(valor[1], bool):
+        raise ConfigInvalida(f"en {campo}, recursivo va true o false, sin comillas")
+    return resolver(valor[0], base), valor[1], str(valor[2] or "")
+
+
+def sin_alias_repetido(raices):
+    reservados = {alias for _, _, alias in raices}
+    tomados = set()
+    salida = []
+    for ruta, recursivo, alias in raices:
+        if alias in tomados:
+            nombre = Path(ruta).name or "raiz"
+            alias, n = nombre, 2
+            while alias in tomados or alias in reservados:
+                alias, n = f"{nombre}-{n}", n + 1
+        tomados.add(alias)
+        salida.append((ruta, recursivo, alias))
+    return salida
 
 
 def fuentes_de(datos, base):
     salida = []
     vistos = set()
-    for i, fuente in enumerate(datos.get("fuentes") or []):
+    for i, fuente in enumerate(lista(datos.get("fuentes"), "fuentes")):
         campo = f"fuentes[{i}]"
         if not isinstance(fuente, dict) or not isinstance(fuente.get("id"), str) or not fuente["id"]:
             raise ConfigInvalida(f"{campo} necesita un id")
         if fuente["id"] in vistos:
             raise ConfigInvalida(f'el id «{fuente["id"]}» está repetido en fuentes')
         vistos.add(fuente["id"])
+        for clave in SI_O_NO_FUENTE:
+            if clave in fuente and not isinstance(fuente[clave], bool):
+                raise ConfigInvalida(f"{campo}.{clave} tiene que ser true o false, sin comillas")
+        for clave in ("patron", "proyecto"):
+            if fuente.get(clave) is not None and not isinstance(fuente[clave], str):
+                raise ConfigInvalida(f"{campo}.{clave} tiene que ser un texto, entre comillas")
         armada = dict(fuente)
         armada["nombre"] = str(fuente.get("nombre") or fuente["id"])
         armada["color"] = str(fuente.get("color") or "#868E96")
-        armada["raices"] = [raiz_de(r, f"{campo}.raices", base) for r in fuente.get("raices") or []]
+        armada["raices"] = sin_alias_repetido([raiz_de(r, f"{campo}.raices", base)
+                                               for r in lista(fuente.get("raices"), f"{campo}.raices")])
         if fuente.get("memoria"):
             armada["proyecto"] = resolver(fuente["proyecto"], base) if fuente.get("proyecto") else ""
         if "excluir" in fuente:
@@ -87,6 +140,8 @@ def fuentes_de(datos, base):
         for clave, tipos in (("peso_busqueda", (int, float)), ("prioridad", (int,))):
             if clave in fuente and (isinstance(fuente[clave], bool) or not isinstance(fuente[clave], tipos)):
                 raise ConfigInvalida(f"{campo}.{clave} tiene que ser un número")
+        if "peso_busqueda" in fuente and fuente["peso_busqueda"] <= 0:
+            raise ConfigInvalida(f"{campo}.peso_busqueda tiene que ser mayor que 0 (1 es el peso de fábrica)")
         if "lobulo" in fuente and fuente["lobulo"] not in LOBULOS:
             raise ConfigInvalida(f'{campo}.lobulo tiene que ser uno de: {", ".join(LOBULOS)}')
         ancla = fuente.get("ancla")
@@ -109,7 +164,7 @@ def expresion(valor, campo):
 
 def codigo_de(valor, campo, base):
     salida = []
-    for i, raiz in enumerate(valor or []):
+    for i, raiz in enumerate(lista(valor, campo)):
         if isinstance(raiz, str):
             raiz = {"ruta": raiz}
         if not isinstance(raiz, dict) or not isinstance(raiz.get("ruta"), str) or not raiz["ruta"]:
@@ -121,7 +176,7 @@ def codigo_de(valor, campo, base):
 
 def proyectos_de(datos, base):
     salida = []
-    for i, proyecto in enumerate(datos.get("proyectos") or []):
+    for i, proyecto in enumerate(lista(datos.get("proyectos"), "proyectos")):
         campo = f"proyectos[{i}]"
         if not isinstance(proyecto, dict) or not isinstance(proyecto.get("raiz"), str) or not proyecto["raiz"]:
             raise ConfigInvalida(f"{campo} necesita una raiz")
@@ -153,7 +208,7 @@ def proyectos_de(datos, base):
 
 def pesadas_de(datos):
     salida = []
-    for i, pesada in enumerate(datos.get("carpetas_pesadas") or []):
+    for i, pesada in enumerate(lista(datos.get("carpetas_pesadas"), "carpetas_pesadas")):
         campo = f"carpetas_pesadas[{i}]"
         bajar = pesada.get("bajar_solo") if isinstance(pesada, dict) else None
         if not isinstance(pesada, dict) or not isinstance(pesada.get("contiene"), str) or not isinstance(bajar, dict):
@@ -164,7 +219,7 @@ def pesadas_de(datos):
 
 def alias_de(datos, base):
     salida = []
-    for i, par in enumerate(datos.get("alias_rutas") or []):
+    for i, par in enumerate(lista(datos.get("alias_rutas"), "alias_rutas")):
         if not isinstance(par, list) or len(par) != 2 or not all(isinstance(x, str) and x for x in par):
             raise ConfigInvalida(f"alias_rutas[{i}] tiene que ser [ruta que se ve, ruta real]")
         desde, hacia = (resolver(x, base).replace("\\", "/").lower().rstrip("/") + "/" for x in par)
@@ -186,7 +241,7 @@ def handoffs_de(datos):
     if not isinstance(valor, dict) or not isinstance(valor.get("prefijo"), str) or not valor["prefijo"].strip():
         raise ConfigInvalida("handoffs necesita un «prefijo», el principio del nombre de sus archivos")
     lados = []
-    for i, lado in enumerate(valor.get("lados") or []):
+    for i, lado in enumerate(lista(valor.get("lados"), "handoffs.lados")):
         campo = f"handoffs.lados[{i}]"
         if not isinstance(lado, dict) or not isinstance(lado.get("id"), str) or not lado["id"]:
             raise ConfigInvalida(f"{campo} necesita un id")
@@ -252,6 +307,16 @@ def partir_sola_de(datos):
     return opciones
 
 
+def indice_meta_de(datos):
+    valor = datos.get("indice_meta_kb")
+    if valor is None:
+        return None
+    if isinstance(valor, bool) or not isinstance(valor, (int, float)) or not 0 < valor <= TOPE_INDICE_KB:
+        raise ConfigInvalida(f"indice_meta_kb es la meta del índice de la memoria en KB: el médico avisa cuando la pasa "
+                             f"(un número de más de 0 hasta {TOPE_INDICE_KB}, el tope que Claude lee al arrancar)")
+    return valor
+
+
 def aprender_de(datos):
     valor = datos.get("aprender", True)
     if not isinstance(valor, bool):
@@ -266,12 +331,45 @@ def ordenar_con_preguntas_de(datos):
     return valor
 
 
+def claves_desconocidas(datos):
+    avisos = []
+
+    def revisar(objeto, clase, campo):
+        if not isinstance(objeto, dict):
+            return
+        for clave in objeto:
+            if clave in CLAVES[clase] or clave.startswith(("_", "$", "//")):
+                continue
+            parecida = difflib.get_close_matches(clave, CLAVES[clase], 1, 0.6)
+            avisos.append(f"{campo} tiene «{clave}», que Neuromapa no conoce"
+                          + (f" (¿quisiste decir «{parecida[0]}»?)" if parecida else "") + ": no hace nada.")
+
+    revisar(datos, "arriba", "la configuración")
+    for i, fuente in enumerate(datos.get("fuentes") or []):
+        nombre = f"fuentes[{i}] («{fuente.get('id')}»)"
+        revisar(fuente, "fuente", nombre)
+        for j, raiz in enumerate(fuente.get("raices") or []):
+            revisar(raiz, "raiz", f"{nombre}.raices[{j}]")
+    for i, proyecto in enumerate(datos.get("proyectos") or []):
+        nombre = f"proyectos[{i}] («{proyecto.get('alias') or proyecto.get('raiz')}»)"
+        revisar(proyecto, "proyecto", nombre)
+        for j, raiz in enumerate(proyecto.get("codigo") or []):
+            revisar(raiz, "codigo", f"{nombre}.codigo[{j}]")
+    for clave in ("handoffs", "freno", "dormir_con_claude"):
+        revisar(datos.get(clave), clave, clave)
+    for i, lado in enumerate((datos.get("handoffs") or {}).get("lados") or []):
+        revisar(lado, "lado", f"handoffs.lados[{i}]")
+    for i, pesada in enumerate(datos.get("carpetas_pesadas") or []):
+        revisar(pesada, "pesada", f"carpetas_pesadas[{i}]")
+    return avisos
+
+
 def armar(datos, base):
     if not isinstance(datos, dict):
         raise ConfigInvalida("la configuración tiene que ser un objeto JSON")
     if not isinstance(datos.get("usuario", ""), str):
         raise ConfigInvalida("usuario tiene que ser un texto")
-    return {
+    armada = {
         "datos": Path(base),
         "usuario": datos.get("usuario", ""),
         "lobulos": rotulos_de(datos),
@@ -289,12 +387,15 @@ def armar(datos, base):
         "freno": freno_de(datos),
         "dormir_con_claude": dormir_con_claude_de(datos),
         "partir_sola": partir_sola_de(datos),
+        "indice_meta_kb": indice_meta_de(datos),
         "borrar_registros_dias": dias_de_registro(datos),
         "aprender": aprender_de(datos),
         "ordenar_con_preguntas": ordenar_con_preguntas_de(datos),
         "comparar_aprendido": comparar_aprendido_de(datos),
         "sensibles": textos(datos.get("sensibles"), "sensibles", True),
     }
+    armada["avisos"] = claves_desconocidas(datos)
+    return armada
 
 
 def comando():
@@ -363,6 +464,9 @@ def cargar(ruta=None):
     except json.JSONDecodeError as error:
         raise ConfigInvalida(f"{ruta} no es un JSON válido (se rompe en el renglón {error.lineno}, columna {error.colno})"
                              ) from error
+    except UnicodeDecodeError as error:
+        raise ConfigInvalida(f"{ruta} no está guardado en UTF-8: abrilo con un editor de texto y guardalo eligiendo la "
+                             "codificación UTF-8") from error
     except (OSError, ValueError) as error:
         raise ConfigInvalida(f"no pude leer {ruta}: {error}") from error
     if isinstance(datos, dict) and "fuentes" not in datos:

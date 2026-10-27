@@ -9,10 +9,28 @@ buscador que le da a Claude lo que ya sabe, antes de que lo vuelva a averiguar.
 
 ![Neuromapa con las notas de ejemplo de la demo](docs/neuromapa.gif)
 
+## Empezar en un minuto
+
+Hace falta [Python](https://www.python.org/downloads/) 3.10 o más nuevo y [git](https://git-scm.com/downloads).
+
+1. Instalalo:
+
+   ```
+   claude plugin marketplace add lumiel777/neuromapa
+   claude plugin install neuromapa@neuromapa
+   ```
+
+2. Cerrá y volvé a abrir Claude Code: el plugin entra recién ahí.
+3. En una sesión de Claude Code, escribí `/neuromapa:abrir`. Se abre el mapa de tus notas. Si todavía no tenés
+   notas, `/neuromapa:abrir --demo` muestra uno con notas de ejemplo.
+
+En el mapa, `?` explica qué es cada cosa. Más detalle en [Instalar](#instalar) y en la
+[wiki](https://github.com/lumiel777/neuromapa/wiki).
+
 ## Qué hace
 
 - **Un mapa de tus notas.** Junta la memoria de Claude Code (`~/.claude/projects/*/memory/`), tus `CLAUDE.md` y los
-  documentos que elijas, y los dibuja como un cerebro: cada nota es una neurona y cada vez que una nota nombra a otra,
+  documentos que elijas, y los dibuja como un cerebro: cada nota es una figura y cada vez que una nota nombra a otra,
   una conexión.
 - **En vivo.** Mientras Claude trabaja, se ve qué nota lee, qué archivo edita, qué agente lanzó y en qué chat. Abajo,
   el río del tiempo muestra los últimos 10 minutos con una línea por chat: cada cosa que hizo, cuándo le escribiste,
@@ -37,13 +55,18 @@ buscador que le da a Claude lo que ya sabe, antes de que lo vuelva a averiguar.
   querés (o todo lo de un archivo). Cada uno aprende en
   su computadora, de su propio uso, y arranca sabiendo algo gracias a las charlas que Claude Code ya tenía guardadas.
 - **Avisos automáticos.** Cuando Claude crea una memoria parecida a otra, cuando dos chats editan el mismo archivo,
-  cuando escribe en una nota un enlace a otra nota que no existe y cuando aparece un problema nuevo en tus notas.
+  cuando escribe en una nota un enlace a otra nota que no existe, cuando deja en el índice (`MEMORY.md`) un renglón
+  demasiado largo y cuando aparece un problema nuevo en tus notas.
+- **Lo que hizo por vos.** Arriba a la izquierda del mapa: en los últimos 7 días, cuántas pistas le pasó a Claude,
+  cuántas sirvieron, cuántas notas recomendadas leyó y qué problemas del médico se arreglaron.
 - **Opcional:** el contexto automático, que en cada pedido le pasa a Claude lo más útil de tus notas y, al editar un
   archivo de código, le dice cuál es la nota que se suele leer con él si todavía no la leyó (se prende en las
   [opciones](#opciones) del plugin); un freno que pregunta antes de lanzar agentes cuando los de un chat ya gastaron
   muchos tokens en la última hora (se prende en el `config.json`); y un conector para el modo Chat de la app de
   escritorio de Claude, donde los hooks no corren: le da tus notas en solo lectura y esas charlas se ven en el mapa
-  (ver [cómo funciona](docs/como-funciona.md#conector-para-la-app-de-escritorio-de-claude-opcional)).
+  (ver [cómo funciona](docs/como-funciona.md#conector-para-la-app-de-escritorio-de-claude-opcional)). El mismo
+  conector sirve para Codex, que con un hook recibe además la pista en cada pedido (ver
+  [Codex](docs/como-funciona.md#codex-opcional)).
 
 ## Lo que se midió
 
@@ -83,7 +106,7 @@ claude plugin install neuromapa@neuromapa
 
 O, adentro de una sesión de Claude Code: `/plugin marketplace add lumiel777/neuromapa` y después `/plugin install neuromapa@neuromapa`.
 
-La primera vez que abras Claude Code después de instalarlo, Neuromapa avisa que quedó instalado y cómo abrir el mapa.
+Después cerrá y volvé a abrir Claude Code: los hooks y los comandos `/neuromapa:…` se cargan recién ahí. La primera vez que abras Claude Code después de instalarlo, Neuromapa avisa que quedó instalado y cómo abrir el mapa.
 Si falta Python, lo avisa al abrir Claude Code y no hace nada hasta que lo instales. Si al instalar Claude Code
 dice que hay 2 opciones sin configurar («userConfig options not yet set»), es normal: las dos tienen su valor de
 fábrica y se cambian cuando quieras (ver [Opciones](#opciones)).
@@ -106,6 +129,7 @@ quedan como estaban.
 | Abrir el mapa en vivo | `/neuromapa:abrir` |
 | Qué se sabe de un tema | `/neuromapa:sobre cómo decide el programador si riega` |
 | Revisar la memoria | `/neuromapa:salud` |
+| Ver si la instalación anda | Pedile a Claude que corra `neuromapa chequeo`: dice qué falta en palabras simples |
 | Probar con notas inventadas | `/neuromapa:abrir --demo` (ver [demo/LEEME.md](demo/LEEME.md)) |
 
 Mientras el plugin está prendido, Claude tiene además el comando `neuromapa` en su consola (`neuromapa --help` lista
@@ -155,7 +179,9 @@ arreglarlo.
   propio dentro de la carpeta de datos. `/neuromapa:abrir` levanta el servidor del mapa y abre tu navegador. El índice
   de búsqueda y la lista de problemas se rearman en segundo plano con el mismo Python. Dormir con Claude, si lo
   prendés, corre tu `claude`. `herramientas/bajar_librerias.py` baja d3 y marked de `cdn.jsdelivr.net`, pero es para
-  quien mantiene el proyecto: ningún hook lo corre. El código de `demo/` es de proyectos inventados y no se ejecuta.
+  quien mantiene el proyecto: ningún hook lo corre. El código de `demo/` es de proyectos inventados y no se ejecuta. Si
+  sumás el conector a la app de escritorio o a Codex, ellos corren `conector_mcp.py` con tu Python, y Codex también
+  `hook_servir.py` si le sumás el hook.
 - **Solo cambia una nota si lo aprobás:** el repaso de la noche propone arreglos y `--aplicar` cambia solo los que
   elijas. `--partir` (pasar lo viejo de una nota larga a otra nota) y `--renombrar` (cambiarle el nombre a una nota y
   a lo que la nombra en la memoria) muestran primero el plan y lo hacen recién con el código de ese plan
@@ -163,8 +189,10 @@ arreglarlo.
   Neuromapa no escribe en tus notas. La única excepción la prendés vos: con `partir_sola` en el `config.json`, la
   pasada de cada día parte sola la memoria que está por llenarse: pasa sus entradas más viejas a una nota de historia
   o, si no tiene fechas, su segunda mitad a una nota «parte 2». Lo hace con la misma copia de antes y sin perder un
-  renglón, lo anota en `respaldos/partidas.log` y se lo avisa a Claude. Si la nota se estaba editando, vuelve a probar
-  a la media hora con un proceso de fondo del mismo Python (ver [cómo funciona](docs/como-funciona.md)). Viene
+  renglón, lo anota en `respaldos/partidas.log` y se lo avisa a Claude. Con ese mismo interruptor cuida el índice: si
+  una nota tiene sus historias en renglones sueltos de `MEMORY.md`, los junta en uno, sin cambiar lo que dice cada
+  uno ni perder un enlace, con la misma copia y el mismo aviso. Si la nota o el índice se estaban editando, vuelve a
+  probar a la media hora con un proceso de fondo del mismo Python (ver [cómo funciona](docs/como-funciona.md)). Viene
   apagado.
 - **Reglas y skills, solo si las confirmás:** `--reglas` y `--recetas` proponen pasar una memoria a regla por carpeta
   o una receta a skill, y solo leen. `--regla` y `--receta` muestran el texto y, recién con el código de ese texto
@@ -199,7 +227,8 @@ arreglarlo.
   empezar desde ahí. `--sobre` y `--buscar` con `--al FECHA` responden con la memoria como estaba ese día: para eso
   copian esa versión a la carpeta temporal de tu cuenta y la borran al terminar. `--cambios` y el aviso «cambió el…»
   de `--sobre` solo leen ese historial para comparar versiones: no guardan nada.
-- Lo que Claude lee de Neuromapa va a Anthropic como cualquier archivo que Claude abre.
+- Lo que Claude lee de Neuromapa va a Anthropic como cualquier archivo que Claude abre. Si lo conectás a Codex, lo que
+  Codex lee (y la pista de cada pedido, si le sumás el hook) va a OpenAI; lo que tiene forma de clave sale tapado.
 - **La carpeta de datos tiene que ser solo tuya**, no una compartida ni la raíz de un disco que usan otras cuentas de la
   PC: quien pueda escribir ahí puede cambiar lo que Neuromapa le pasa a Claude. Las carpetas que crea Neuromapa nacen
   cerradas para tu cuenta, y `/neuromapa:salud` avisa (con el comando para cerrarla) si otra cuenta puede escribir en
@@ -232,4 +261,5 @@ Para colaborar, [CONTRIBUTING.md](CONTRIBUTING.md); los cambios de cada versión
 
 ## Licencia
 
-[MIT](LICENSE). Trae adentro d3 (ISC) y marked (MIT), sin cambios: ver [vendor/LICENCIAS.md](vendor/LICENCIAS.md).
+[MIT](LICENSE). Trae adentro, sin cambios, los módulos de d3 que usa la página (ISC; `d3-ease`, BSD) y marked (MIT):
+ver [vendor/LICENCIAS.md](vendor/LICENCIAS.md).

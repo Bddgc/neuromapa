@@ -1,3 +1,4 @@
+import bisect
 import collections
 import datetime
 import hashlib
@@ -11,7 +12,7 @@ from pathlib import Path
 
 import archivos
 from archivos import escribir_atomico
-from textos import cantidad, decimal, miles
+from textos import cantidad, decimal, miles, recortar, sin_wiki
 
 BOM = b"\xef\xbb\xbf"
 RESPALDOS = "respaldos"
@@ -29,6 +30,8 @@ RE_TOMO = re.compile(r"-parte-(\d+)$", re.I)
 RE_TITULO_DE_TOMO = re.compile(r",? parte \d+$", re.I)
 RE_ENLACE = re.compile(r"\[[^\]\n]*\]\(\s*<?(?:\./)?([^)>#\s]+\.md)[)#>\s]", re.I)
 RE_MARCA_ARCHIVO = re.compile(r"\((?:archivo|archive|archived)\)", re.I)
+RE_RENGLON_DE_UNA = re.compile(r"^([ \t]*[-*+][ \t]+)\[([^\]\n]+)\]\(\s*(<[^>\n]+>|[^)\s]+)\s*\)[ \t]*(?:[—–-]+[ \t]*)?(.*)$")
+RE_TITULO_DE_HISTORIA = re.compile(r"[,:]?\s*(?:historia|history)\s+\d+\s*\((?:archivo|archive|archived)\)\s*$", re.I)
 RE_VIGENTE = re.compile(r"\s*\((?:vigente|actual|current)\)\s*$", re.I)
 RE_SELLO = re.compile(r"^\s*(?:modified|created|updated|originSessionId)\s*:", re.I)
 RE_NOMBRE_MALO = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -49,6 +52,7 @@ ENTRADAS_QUE_QUEDAN = 3
 ORDEN_MINIMO = 0.9
 ALIVIO_MINIMO = 0.05
 QUIETA = 600
+VUELTAS = 8
 HISTORIA_LLENA = 0.8
 REGISTRO = "partidas.log"
 ULTIMAS = 10
@@ -137,13 +141,8 @@ def piezas_de(renglones):
     return piezas
 
 
-def recortar(texto, largo):
-    texto = re.sub(r"\s+", " ", texto).strip()
-    return texto if len(texto) <= largo else texto[:largo - 1].rstrip() + "…"
-
-
 def limpiar(texto):
-    texto = re.sub(r"\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]", r"\1", texto)
+    texto = sin_wiki(texto)
     texto = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", texto)
     texto = re.sub(r"^(?:#{1,6}|[-*+]|\d{1,3}[.)])[ \t]+", "", texto.strip())
     return re.sub(r"\s+", " ", texto.replace("**", "").replace("`", "")).strip()
@@ -239,11 +238,88 @@ def huella_de(*partes):
     return suma.hexdigest()[:8]
 
 
-def cambio_de_indice(texto, fuente, destino, titulo, gancho, numero, tomo=False):
+def tallo_de(enlace):
+    return Path(enlace.strip("<> ")).stem.lower()
+
+
+def lo_que_agrega(titulo, nombre):
+    resto = RE_TITULO_DE_HISTORIA.sub("", titulo).strip()
+    if nombre and resto.lower().startswith(nombre.lower()):
+        resto = resto[len(nombre):]
+    return resto.strip(" ,:;—–-")
+
+
+def sigue_abajo(renglones, i):
+    siguiente = pelado(renglones[i + 1]) if i + 1 < len(renglones) else ""
+    return bool(siguiente.strip()) and siguiente[:1] in " \t" and not RE_ITEM.match(siguiente.lstrip())
+
+
+def juntar_historias(texto, familia=None, minimo=2, titulo=""):
     renglones = renglones_de(texto)
+    sueltas = {}
+    juntas = {}
+    trabadas = set()
+    for i, renglon in enumerate(renglones):
+        crudo = pelado(renglon)
+        enlaces = list(RE_ENLACE.finditer(crudo))
+        de_historia = [tallo_de(m.group(1)) for m in enlaces if RE_PARTE.search(tallo_de(m.group(1)))]
+        if not de_historia or not RE_ITEM.match(crudo.lstrip()):
+            continue
+        clave = RE_PARTE.sub("", de_historia[0])
+        if familia is not None and clave != familia:
+            continue
+        una = RE_RENGLON_DE_UNA.match(crudo) if len(enlaces) == 1 else None
+        if sigue_abajo(renglones, i):
+            trabadas.add(clave)
+        elif RE_MARCA_ARCHIVO.search(crudo[:enlaces[0].start()]):
+            juntas.setdefault(clave, i)
+        elif una and tallo_de(una.group(3)) == de_historia[0]:
+            sueltas.setdefault(clave, []).append((int(RE_PARTE.search(de_historia[0]).group(1)), i, una))
+    cambios = []
+    sobran = set()
+    for clave, lista in sueltas.items():
+        lista.sort(key=lambda x: x[:2])
+        if len(lista) + (clave in juntas) < minimo or clave in trabadas:
+            continue
+        nombre = next((RE_TITULO_DE_HISTORIA.sub("", t).strip() for t in [m.group(2) for _, _, m in lista] + [titulo]
+                       if RE_TITULO_DE_HISTORIA.search(t) and RE_TITULO_DE_HISTORIA.sub("", t).strip()), "")
+        pedazos = []
+        for numero, _, m in lista:
+            dice = " — ".join(x for x in (lo_que_agrega(m.group(2), nombre), m.group(4).strip()) if x)
+            pedazos.append(f"[{numero}]({m.group(3)})" + (f" {dice}" if dice else ""))
+        if clave in juntas:
+            lugar = juntas[clave]
+            nuevo = pelado(renglones[lugar]).rstrip() + "".join(f"; {p}" for p in pedazos)
+        else:
+            if not nombre:
+                continue
+            lugar = min(i for _, i, _ in lista)
+            nuevo = f"{lista[0][2].group(1)}{nombre}, historias (archivo): " + "; ".join(pedazos)
+        renglones[lugar] = nuevo + (renglones[lugar][len(pelado(renglones[lugar])):] or fin_de_renglon(texto))
+        sobran |= {i for _, i, _ in lista if i != lugar}
+        cambios.append({"familia": clave, "juntadas": len(lista) + (clave in juntas), "dice": nuevo.strip(),
+                        "ganchos": [m.group(4).strip() for _, _, m in lista],
+                        "palabras": {p for _, _, m in lista
+                                     for p in re.findall(r"\w{3,}", RE_TITULO_DE_HISTORIA.sub("", m.group(2)).lower())}})
+    salida = "".join(r for i, r in enumerate(renglones) if i not in sobran)
+    antes = sorted(m.group(1).lower() for m in RE_ENLACE.finditer(texto))
+    if antes != sorted(m.group(1).lower() for m in RE_ENLACE.finditer(salida)) or any(
+            g not in salida for c in cambios for g in c["ganchos"]) or any(
+            p not in salida.lower() for c in cambios for p in c["palabras"]):
+        return texto, []
+    for cambio in cambios:
+        cambio["renglon"] = next((n for n, r in enumerate(renglones_de(salida), 1) if pelado(r).strip() == cambio["dice"]), 0)
+    return salida, cambios
+
+
+def cambio_de_indice(texto, fuente, destino, titulo, gancho, numero, tomo=False):
     fin = fin_de_renglon(texto)
     base = RE_PARTE.sub("", Path(fuente).stem).lower()
     raiz = RE_TOMO.sub("", base)
+    juntadas = []
+    if not tomo:
+        texto, juntadas = juntar_historias(texto, base, 1, titulo)
+    renglones = renglones_de(texto)
 
     def de_la_familia(enlace):
         tallo = Path(enlace).stem.lower()
@@ -259,9 +335,12 @@ def cambio_de_indice(texto, fuente, destino, titulo, gancho, numero, tomo=False)
             return None, "el índice ya nombra esa nota"
         primero = RE_ENLACE.search(renglon)
         hermanas = [n for n in nombres if RE_PARTE.sub("", Path(n).stem) == base and RE_PARTE.search(Path(n).stem)]
-        if not tomo and len(enlaces) > 1 and hermanas and RE_MARCA_ARCHIVO.search(renglon[:primero.start()]):
+        if not tomo and hermanas and RE_MARCA_ARCHIVO.search(renglon[:primero.start()]):
             agregado = f"; [{numero or Path(destino).stem}]({destino}) {recortar(gancho, LARGO_GANCHO_CORTO)}"
             renglones[i] = pelado(renglon).rstrip() + agregado + (renglon[len(pelado(renglon)):] or fin)
+            if juntadas:
+                return "".join(renglones), (f"el renglón {i + 1} del índice pasa a juntar las historias de la nota: "
+                                            f"«{pelado(renglones[i]).strip()}»")
             return "".join(renglones), f"al final del renglón {i + 1} del índice: «{agregado[2:]}»"
         if propio is None and nombres[:1] == [Path(fuente).name.lower()]:
             propio = i
@@ -508,12 +587,14 @@ def aplicar(plan, datos, ahora=None):
                 raise RuntimeError("el índice cambió mientras se hacía el cambio")
             escribir_atomico(plan["indice"], bytes_indice)
             escritos.append((plan["indice"], crudo_indice))
-    except Exception as error:
+    except BaseException as error:
         for ruta, antes in reversed(escritos):
             if antes is None:
                 os.remove(str(ruta))
             else:
                 escribir_atomico(ruta, antes)
+        if not isinstance(error, Exception):
+            raise
         return None, dicho_indice, f"{error}: dejé todo como estaba."
     return carpeta, dicho_indice, None
 
@@ -739,25 +820,28 @@ def referencias_en(cerebro, origen, texto, objetivo, nuevo):
         if desde < hasta and not any(a < hasta and desde < b for a, b, _, _ in hallados):
             hallados.append((desde, hasta, reemplazo, clase))
 
+    renglones = renglones_de(texto)
+    cabeza = sum(len(r) for r in renglones[:fin_de_cabeza(renglones)])
+    nombre_de_la_nota = RE_NAME.search(texto, 0, cabeza)
     if origen["id"] == objetivo["id"]:
-        renglones = renglones_de(texto)
-        cabeza = sum(len(r) for r in renglones[:fin_de_cabeza(renglones)])
-        m = RE_NAME.search(texto, 0, cabeza)
-        if m and nucleo.desentrecomillar(m.group(1)) != nuevo:
-            sumar(m.start(1), m.end(1), nuevo, "name")
+        if nombre_de_la_nota and nucleo.desentrecomillar(nombre_de_la_nota.group(1)) != nuevo:
+            sumar(nombre_de_la_nota.start(1), nombre_de_la_nota.end(1), nuevo, "name")
+        nombre_de_la_nota = None
     for m in nucleo.RE_WIKI.finditer(texto):
         crudo = m.group(1)
         dicho = crudo.strip()
         if cerebro.resolver_wiki(origen["id"], dicho)[0] != objetivo["id"]:
             continue
         desde = m.start(1) + len(crudo) - len(crudo.lstrip())
-        sumar(desde, desde + len(dicho), nuevo + (".md" if dicho.lower().endswith(".md") else ""), "wiki")
+        corte = max(dicho.rfind("/"), dicho.rfind("\\")) + 1
+        sumar(desde + corte, desde + len(dicho), nuevo + (".md" if dicho.lower().endswith(".md") else ""), "wiki")
     for m in nucleo.RE_ENLACE.finditer(texto):
         crudo = m.group(2)
-        if destino_de_enlace(carpeta, crudo) != ruta_vieja:
+        if destino_de_enlace(carpeta, crudo) != ruta_vieja and cerebro.enlace_lleva_a(origen["id"], crudo) != objetivo["id"]:
             continue
         desde, hasta = lugar_del_nombre(crudo)
-        archivo = f"{nuevo}.md"
+        con_md = urllib.parse.unquote(crudo[desde:hasta]).lower().endswith(".md")
+        archivo = f"{nuevo}.md" if con_md else nuevo
         if "%" in crudo[desde:hasta] or (re.search(r"\s", archivo) and not crudo.startswith("<")):
             archivo = urllib.parse.quote(archivo)
         sumar(m.start(2) + desde, m.start(2) + hasta, archivo, "enlace")
@@ -777,7 +861,9 @@ def referencias_en(cerebro, origen, texto, objetivo, nuevo):
             sumar(i, m.end(), f"{nuevo}.md", "archivo")
         elif not any(a <= i < b for a, b, _, _ in hallados):
             dudosos.append(i)
+    raras = []
     if cerebro.fuente_de[objetivo["id"]].get("memoria"):
+        tramos = nucleo.tramos_de_codigo(texto)
         for m in nucleo.RE_TOKEN.finditer(texto):
             ficha = m.group(0).lower()
             ids = cerebro.slugs_mencionables.get(ficha, ())
@@ -785,15 +871,37 @@ def referencias_en(cerebro, origen, texto, objetivo, nuevo):
                 continue
             if texto[m.end():m.end() + 3].lower() == ".md" or texto[max(0, m.start() - 2):m.start()] == "[[":
                 continue
+            if nombre_de_la_nota and nombre_de_la_nota.start(1) <= m.start() < nombre_de_la_nota.end(1):
+                continue
             destino = None
             for grupo in cerebro.memorias_preferidas(origen["id"]):
-                propios = [c for c in ids if cerebro.por_id[c]["grupo"] == grupo]
+                propios = sorted(c for c in ids if cerebro.por_id[c]["grupo"] == grupo)
                 if propios:
-                    destino = propios[0]
+                    if len(propios) == 1:
+                        destino = propios[0]
+                    elif objetivo["id"] in propios:
+                        dudosos.append(m.start())
                     break
-            if destino == objetivo["id"]:
-                sumar(m.start(), m.end(), nuevo, "nombre")
-    return sorted(hallados), dudosos
+            if destino != objetivo["id"]:
+                continue
+            if pegada_a_una_ruta(texto, m.start(), m.end()) or not sola_o_fuera_de_codigo(texto, tramos, m):
+                raras.append((m.start(), m.end()))
+                continue
+            sumar(m.start(), m.end(), nuevo, "nombre")
+    return sorted(hallados), dudosos, raras
+
+
+def pegada_a_una_ruta(texto, desde, hasta):
+    antes = texto[desde - 1] if desde else ""
+    return antes in ("\\", "/") or texto[hasta:hasta + 1] in ("\\", "/") or bool(re.match(r"\.\w", texto[hasta:hasta + 2]))
+
+
+def sola_o_fuera_de_codigo(texto, tramos, m):
+    k = bisect.bisect_right(tramos, (m.start(), float("inf"))) - 1
+    if k < 0 or m.start() >= tramos[k][1]:
+        return True
+    a, b = tramos[k]
+    return texto[a:b].strip("`").strip().lower() == m.group(0).lower()
 
 
 def con_reemplazos(texto, hallados):
@@ -865,9 +973,14 @@ def planear_nombre(contexto, nuevo, datos):
     tomado = cerebro.slugs_memoria.get(objetivo["grupo"], {}).get(nuevo.lower()) if es_memoria else None
     if nueva.exists() or (tomado and tomado != objetivo["id"]):
         return None, f"ya hay una nota que se llama {nuevo}: elegí otro nombre."
+    otras = [] if es_memoria else [c for c in cerebro.por_nombre_sin_md.get(nuevo.lower(), []) if c != objetivo["id"]]
+    if otras:
+        return None, (f'ya hay una nota que se llama {nuevo} en {Path(cerebro.por_id[otras[0]]["ruta"]).parent}: elegí otro '
+                      f"nombre (con dos, los [[{nuevo}]] quedarían ambiguos).")
     cambios = []
     afuera = []
     dudosas = []
+    raras = []
     ejemplos = []
     for nodo in cerebro.nodos:
         propio = nodo["id"] == objetivo["id"]
@@ -877,8 +990,9 @@ def planear_nombre(contexto, nuevo, datos):
             if propio:
                 return None, f"no pude leer {ruta.name} ({error}): no la toco."
             continue
-        hallados, dudosos = referencias_en(cerebro, nodo, texto, objetivo, nuevo)
+        hallados, dudosos, de_ruta = referencias_en(cerebro, nodo, texto, objetivo, nuevo)
         dudosas += [(nodo["ruta"], renglon_de(texto, i)) for i in dudosos]
+        raras += [(nodo["ruta"], renglon_de(texto, a), muestra(texto, a, b)) for a, b in de_ruta]
         if not hallados and not propio:
             continue
         adentro = propio or bool(cerebro.fuente_de[nodo["id"]].get("memoria")) or nodo["grupo"] == objetivo["grupo"]
@@ -894,7 +1008,7 @@ def planear_nombre(contexto, nuevo, datos):
     for c in cambios + de_datos:
         partes += [os.path.normcase(str(c["ruta"])), c["antes"]]
     return {"ruta": ruta, "nueva": nueva, "nuevo": nuevo, "cambios": cambios, "datos": de_datos, "afuera": afuera,
-            "dudosas": dudosas, "ejemplos": ejemplos[:TOPE_EJEMPLOS], "huella": huella_de(*partes)}, None
+            "dudosas": dudosas, "raras": raras, "ejemplos": ejemplos[:TOPE_EJEMPLOS], "huella": huella_de(*partes)}, None
 
 
 def aplicar_nombre(plan, datos, ahora=None):
@@ -908,19 +1022,21 @@ def aplicar_nombre(plan, datos, ahora=None):
                 raise RuntimeError(f'{Path(c["ruta"]).name} cambió mientras se hacía el cambio')
         if plan["nueva"].exists():
             raise RuntimeError(f'ya existe {plan["nueva"].name}')
+        propio = next(c for c in plan["cambios"] if c["propio"])
+        escribir_atomico(plan["nueva"], propio["despues"])
+        creada = True
         for c in todos:
             if not c.get("propio") and c["despues"] != c["antes"]:
                 escribir_atomico(c["ruta"], c["despues"])
                 escritos.append((c["ruta"], c["antes"]))
-        propio = next(c for c in plan["cambios"] if c["propio"])
-        escribir_atomico(plan["nueva"], propio["despues"])
-        creada = True
         os.remove(str(plan["ruta"]))
-    except Exception as error:
-        if creada:
-            os.remove(str(plan["nueva"]))
+    except BaseException as error:
         for ruta, antes in reversed(escritos):
             escribir_atomico(ruta, antes)
+        if creada:
+            os.remove(str(plan["nueva"]))
+        if not isinstance(error, Exception):
+            raise
         return None, f"{error}: dejé todo como estaba."
     return carpeta, None
 
@@ -967,6 +1083,12 @@ def main_renombrar(nota, nuevo, confirmar=""):
         lugares = ", ".join(f"{Path(ruta).name}:{linea}" for ruta, linea in plan["dudosas"][:TOPE_AFUERA])
         lineas.append(f'  No toco {cantidad(len(plan["dudosas"]), "mención dudosa", "menciones dudosas")} (hay otra nota '
                       f"con ese nombre de archivo y no se sabe a cuál apunta): {lugares}.")
+    if plan["raras"]:
+        lineas.append(f'  No toco {cantidad(len(plan["raras"]), "mención", "menciones")} del nombre que están en una ruta, '
+                      "un archivo o un comando (si alguna es la nota, cambiala a mano):")
+        lineas += [f"    {Path(ruta).name}:{linea} «{texto}»" for ruta, linea, texto in plan["raras"][:TOPE_AFUERA]]
+        if len(plan["raras"]) > TOPE_AFUERA:
+            lineas.append(f'    … y {len(plan["raras"]) - TOPE_AFUERA} más.')
     comando = f'{configuracion.comando()} --renombrar "{plan["ruta"]}" {plan["nuevo"]}'
     if not confirmar:
         print("Plan (todavía no cambié nada):")
@@ -1055,7 +1177,7 @@ def corridas_con_fecha(unidades):
             yield (list(reversed(tramo)) if bajan >= suben else tramo)
 
 
-def elegir_viejas(piezas, total, objetivo, hoy, dias_frescos):
+def elegir_viejas(piezas, total, objetivo, hoy, dias_frescos, tope=None):
     limite = None if dias_frescos is None else hoy - datetime.timedelta(days=dias_frescos)
     mejor = None
     for unidades in entradas_de(piezas, hoy):
@@ -1063,14 +1185,15 @@ def elegir_viejas(piezas, total, objetivo, hoy, dias_frescos):
             elegidas = []
             peso = 0
             for u in de_vieja_a_nueva[:len(de_vieja_a_nueva) - ENTRADAS_QUE_QUEDAN]:
-                if (limite and u["fecha"] >= limite) or total - peso <= objetivo:
+                if (limite and u["fecha"] >= limite) or total - peso <= objetivo or (
+                        tope and elegidas and peso + u["bytes"] > tope):
                     break
                 elegidas.append(u)
                 peso += u["bytes"]
             if elegidas and (mejor is None or peso > mejor["bytes"]):
                 mejor = {"desde": min(u["desde"] for u in elegidas), "hasta": max(u["hasta"] for u in elegidas),
                          "bytes": peso, "entradas": len(elegidas), "primera": min(u["fecha"] for u in elegidas),
-                         "ultima": max(u["fecha"] for u in elegidas)}
+                         "ultima": max(u["fecha"] for u in elegidas), "dias": dias_frescos}
     return mejor
 
 
@@ -1154,6 +1277,9 @@ def plan_sola(cerebro, nodo, lleno, opciones, hoy):
         caminos, key=lambda c: c["bytes"], default=None)
     if not eleccion:
         return None, None, "no tiene ni un renglón suelto por donde cortarla (es un solo bloque de código o con sangría)"
+    capacidad = HISTORIA_LLENA * medico.TOKENS_READ * medico.BYTES_POR_TOKEN
+    if "corte" not in eleccion and eleccion["bytes"] > capacidad:
+        eleccion = elegir_viejas(piezas, total, objetivo, hoy, eleccion["dias"], capacidad) or eleccion
     carpeta = cerebro.carpeta_de[nodo["id"]]
     indice = next((Path(n["ruta"]) for n in cerebro.nodos
                    if n["tipo"] == "indice" and cerebro.carpeta_de[n["id"]] == carpeta), None)
@@ -1225,31 +1351,89 @@ def con_descripcion(crudo, descripcion):
     return (BOM if bom else b"") + nuevo.encode("utf-8")
 
 
-def partir_solas(cerebro, datos, opciones, ahora=None, simular=False):
+def partir_solas(cerebro, datos, opciones, ahora=None, simular=False, recargar=None):
     ahora = time.time() if ahora is None else ahora
     hoy = datetime.date.fromtimestamp(ahora)
     hechas = []
     saltadas = []
-    for nodo, lleno in casi_llenas(cerebro, opciones["desde"] / 100):
-        base = {"nota": nodo["ruta"], "lleno": int(lleno * 100)}
+    escritas = {}
+
+    def propia(ruta):
         try:
-            reposo = ahora - os.path.getmtime(nodo["ruta"])
+            return escritas.get(os.path.normcase(str(ruta))) == Path(ruta).read_bytes()
         except OSError:
+            return False
+
+    for vuelta in range(VUELTAS if recargar and not simular else 1):
+        partio = False
+        vistas = {s["nota"] for s in saltadas}
+        for nodo, lleno in casi_llenas(cerebro, opciones["desde"] / 100):
+            if nodo["ruta"] in vistas:
+                continue
+            base = {"nota": nodo["ruta"], "lleno": int(lleno * 100)}
+            try:
+                reposo = (time.time() if vuelta else ahora) - os.path.getmtime(nodo["ruta"])
+            except OSError:
+                continue
+            if not simular and 0 <= reposo < QUIETA and not propia(nodo["ruta"]):
+                saltadas.append(dict(base, espera=True,
+                                     motivo="se guardó hace menos de 10 minutos; vuelve a probar en media hora"))
+                continue
+            plan, dicho, error = plan_sola(cerebro, nodo, lleno, opciones, hoy)
+            if error:
+                saltadas.append(dict(base, motivo=error))
+                continue
+            hecha = dict(base, destino=str(plan["destino"]), antes=len(plan["antes_fuente"]),
+                         despues=len(plan["bytes_fuente"]), lleva=len(plan["bytes_destino"]), t=ahora, **dicho)
+            if not simular:
+                carpeta, _, error = aplicar(plan, datos, ahora)
+                if error:
+                    saltadas.append(dict(base, motivo=error))
+                    continue
+                hecha["respaldo"] = str(carpeta)
+                anotar(datos, hecha)
+                escritas[os.path.normcase(str(plan["ruta"]))] = plan["bytes_fuente"]
+                escritas[os.path.normcase(str(plan["destino"]))] = plan["bytes_destino"]
+                partio = True
+            hechas.append(hecha)
+        if not partio:
+            break
+        cerebro = recargar()
+    return hechas, saltadas
+
+
+def juntar_indices(cerebro, datos, ahora=None, simular=False):
+    ahora = time.time() if ahora is None else ahora
+    hechas = []
+    saltadas = []
+    for nodo in cerebro.nodos:
+        if nodo["tipo"] != "indice" or not cerebro.fuente_de[nodo["id"]].get("memoria"):
             continue
+        ruta = Path(nodo["ruta"])
+        try:
+            crudo, bom, texto = leer(ruta)
+            reposo = ahora - os.path.getmtime(ruta)
+        except (OSError, UnicodeDecodeError):
+            continue
+        nuevo, cambios = juntar_historias(texto)
+        if not cambios:
+            continue
+        base = {"nota": str(ruta), "indice": True, "lleno": 0}
         if not simular and 0 <= reposo < QUIETA:
             saltadas.append(dict(base, espera=True,
                                  motivo="se guardó hace menos de 10 minutos; vuelve a probar en media hora"))
             continue
-        plan, dicho, error = plan_sola(cerebro, nodo, lleno, opciones, hoy)
-        if error:
-            saltadas.append(dict(base, motivo=error))
-            continue
-        hecha = dict(base, destino=str(plan["destino"]), antes=len(plan["antes_fuente"]),
-                     despues=len(plan["bytes_fuente"]), t=ahora, **dicho)
+        despues = (BOM if bom else b"") + nuevo.encode("utf-8")
+        hecha = dict(base, t=ahora, notas=len(cambios), renglones=sum(c["juntadas"] for c in cambios) - len(cambios),
+                     antes=len(crudo), despues=len(despues))
         if not simular:
-            carpeta, _, error = aplicar(plan, datos, ahora)
-            if error:
-                saltadas.append(dict(base, motivo=error))
+            carpeta = respaldar(datos, [ruta], ahora, "juntar-indice")
+            try:
+                if ruta.read_bytes() != crudo:
+                    raise RuntimeError("el índice cambió mientras se hacía el cambio")
+                escribir_atomico(ruta, despues)
+            except (OSError, RuntimeError) as error:
+                saltadas.append(dict(base, motivo=f"{error}: lo dejé como estaba"))
                 continue
             hecha["respaldo"] = str(carpeta)
             anotar(datos, hecha)
@@ -1258,6 +1442,10 @@ def partir_solas(cerebro, datos, opciones, ahora=None, simular=False):
 
 
 def lo_que_pasa(hecha, haria=False):
+    if hecha.get("indice"):
+        return (f'las historias de {cantidad(hecha["notas"], "nota", "notas")} {"quedarían" if haria else "quedaron"} en un '
+                f'renglón por nota ({cantidad(hecha["renglones"], "renglón menos", "renglones menos")}), con lo que decía '
+                "cada una")
     destino = Path(hecha["destino"]).name
     if hecha.get("tomo"):
         return (f'de «{hecha["primero"]}» en adelante ({cantidad(hecha["piezas"], "pieza", "piezas")}) '
@@ -1267,9 +1455,9 @@ def lo_que_pasa(hecha, haria=False):
 
 
 def anotar(datos, hecha):
-    renglon = (f'{time.strftime("%Y-%m-%d %H:%M", time.localtime(hecha["t"]))}  {Path(hecha["nota"]).name} (estaba al '
-               f'{hecha["lleno"]} % del tope de una lectura): {lo_que_pasa(hecha)}; copia de antes en '
-               f'{Path(hecha["respaldo"]).name}\n')
+    estaba = "el índice" if hecha.get("indice") else f'estaba al {hecha["lleno"]} % del tope de una lectura'
+    renglon = (f'{time.strftime("%Y-%m-%d %H:%M", time.localtime(hecha["t"]))}  {Path(hecha["nota"]).name} ({estaba}): '
+               f'{lo_que_pasa(hecha)}; copia de antes en {Path(hecha["respaldo"]).name}\n')
     try:
         with open(Path(datos) / RESPALDOS / REGISTRO, "a", encoding="utf-8", newline="\n") as registro:
             registro.write(renglon)
@@ -1293,13 +1481,23 @@ def main_por_partir():
     desde = (opciones or configuracion.PARTIR_SOLA)["desde"]
     if not hechas and not saltadas:
         print(f"Ninguna memoria llega al {desde} % del tope de una lectura.")
+    juntados = juntar_indices(cerebro, nucleo.DATOS, simular=True)[0]
+    for h in juntados:
+        print(f'En el índice {Path(h["nota"]).name}, {lo_que_pasa(h, True)}, y quedaría en {kb(h["despues"])} '
+              f'(hoy {kb(h["antes"])}).')
+    import medico
+    llena = desde / 100 * medico.TOKENS_READ * medico.BYTES_POR_TOKEN
     for h in hechas:
+        sigue = [Path(h["nota"]).name] if h["despues"] >= llena else []
+        sigue += [Path(h["destino"]).name] if h.get("tomo") and h["lleva"] >= llena else []
         print(f'{Path(h["nota"]).name} está al {h["lleno"]} %: {lo_que_pasa(h, True)}, y quedaría en '
-              f'{kb(h["despues"])} (hoy {kb(h["antes"])}).')
+              f'{kb(h["despues"])} (hoy {kb(h["antes"])})'
+              + (f'; {" y ".join(sigue)} seguiría{"n" if len(sigue) > 1 else ""} pasada{"s" if len(sigue) > 1 else ""} '
+                 "del tope, así que la misma pasada la volvería a partir" if sigue else "") + ".")
     for s in saltadas:
         print(f'{Path(s["nota"]).name} está al {s["lleno"]} %, pero {s["motivo"]}. Se puede partir a mano: '
               f'{configuracion.comando()} --partir "{Path(s["nota"]).name}"')
-    if hechas:
+    if hechas or juntados:
         print("Con «partir_sola» prendido en el config.json, la pasada de cada día hace esos cambios y lo avisa."
               if not opciones else "«partir_sola» está prendido: la pasada de cada día hace esos cambios y lo avisa "
               f"({configuracion.comando()} --partir-llenas los hace ahora).")

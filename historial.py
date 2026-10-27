@@ -14,8 +14,9 @@ from pathlib import Path
 import cerebro as nucleo
 import configuracion
 import permisos
+import procesos
 from archivos import es_sensible, escribir_atomico, leer_objeto_json
-from textos import cantidad
+from textos import cantidad, miles
 
 CARPETA = Path(nucleo.DATOS) / "historial"
 ESTADO = CARPETA / "estado.json"
@@ -30,6 +31,9 @@ TOPE_HALLAZGOS = 20
 _limite = [None]
 TOPE_RENGLONES = 3
 LARGO_RENGLON = 200
+TOPE_NOMBRES = 20
+TANDA_RUTAS = 100
+TRABADO_DESDE = 86400
 NOMBRES_CAMBIO = {"M": ("cambiada", "cambiadas"), "A": ("nueva", "nuevas"), "D": ("borrada", "borradas")}
 RE_HORA = r"(?:[ T,]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?\Z"
 RE_FECHA_ISO = re.compile(r"(\d{4})-(\d{1,2})-(\d{1,2})" + RE_HORA)
@@ -67,9 +71,8 @@ def git(carpeta, *argumentos, binario=False, entrada=None):
     if espera <= 0:
         return None
     try:
-        proceso = subprocess.run(orden, cwd=carpeta, env=entorno, input=entrada, stdout=subprocess.PIPE,
-                                 stderr=subprocess.DEVNULL, timeout=espera,
-                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        proceso = procesos.correr(orden, timeout=espera, cwd=carpeta, env=entorno, input=entrada,
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         return None
     if proceso.returncode != 0:
@@ -115,7 +118,9 @@ def resumen(cambios):
     for letra, (uno, varios) in NOMBRES_CAMBIO.items():
         nombres = [Path(ruta).name for estado, ruta in cambios if estado == letra]
         if nombres:
-            partes.append(f"{cantidad(len(nombres), uno, varios)}: {', '.join(nombres)}")
+            resto = len(nombres) - TOPE_NOMBRES
+            partes.append(f"{cantidad(len(nombres), uno, varios)}: {', '.join(nombres[:TOPE_NOMBRES])}"
+                          + (f" y {miles(resto)} más" if resto > 0 else ""))
     return "; ".join(partes) or "sin cambios"
 
 
@@ -132,8 +137,9 @@ def guardar_carpeta(carpeta):
         return False
     seguidas = (git(carpeta, "ls-files") or "").splitlines()
     sacar = [r for r in seguidas if fuera_del_historial(carpeta, r)]
-    if sacar and git(carpeta, "rm", "--cached", "-q", "--", *sacar) is None:
-        return False
+    for i in range(0, len(sacar), TANDA_RUTAS):
+        if git(carpeta, "rm", "--cached", "-q", "--", *sacar[i:i + TANDA_RUTAS]) is None:
+            return False
     salida = git(carpeta, "diff", "--cached", "--name-status", "--no-renames")
     if salida is None:
         return False
@@ -148,22 +154,38 @@ def guardar():
     if not hay_git():
         return False
     estado = leer_objeto_json(ESTADO)
+    fallas = dict(estado["fallas"]) if isinstance(estado.get("fallas"), dict) else {}
+    antes = dict(fallas)
     cambio = False
     _limite[0] = time.monotonic() + PRESUPUESTO
     try:
         for carpeta in carpetas():
             clave = repo_de(carpeta).name
             actual = firma(carpeta)
-            if estado.get(clave) == actual:
-                continue
-            if guardar_carpeta(carpeta):
+            if estado.get(clave) != actual and guardar_carpeta(carpeta):
                 estado[clave] = actual
                 cambio = True
+            if estado.get(clave) == actual:
+                fallas.pop(clave, None)
+            else:
+                fallas.setdefault(clave, int(time.time()))
     finally:
         _limite[0] = None
-    if cambio:
+    estado.pop("fallas", None)
+    if fallas:
+        estado["fallas"] = fallas
+    if (cambio or fallas != antes) and ESTADO.parent.is_dir():
         escribir_atomico(ESTADO, json.dumps(estado, ensure_ascii=False, indent=1) + "\n")
     return cambio
+
+
+def trabado_desde(lista, ahora=None):
+    fallas = leer_objeto_json(ESTADO).get("fallas")
+    ahora = time.time() if ahora is None else ahora
+    viejas = sorted((t, carpeta) for carpeta in lista
+                    for t in [fallas.get(repo_de(carpeta).name) if isinstance(fallas, dict) else None]
+                    if isinstance(t, int) and ahora - t > TRABADO_DESDE)
+    return viejas[0] if viejas else None
 
 
 def fecha(segundos):
@@ -186,6 +208,12 @@ def linea_salud():
         return ("Historial de la memoria: apagado, porque no encontré git. Con git instalado, cada cambio de la memoria "
                 "queda guardado y nada de lo que se borre se pierde.")
     guardar()
+    trabado = trabado_desde(lista)
+    if trabado:
+        desde, carpeta = trabado
+        return (f"AVISO   Historial de la memoria: desde el {fecha(desde)} no pude guardar ninguna versión nueva de {carpeta} "
+                f"(git falla o tarda demasiado), así que lo que cambió desde entonces no está en el historial. Para ver qué "
+                f'le pasa a git: git --git-dir="{repo_de(carpeta)}" --work-tree="{carpeta}" status')
     tiempos = [t for carpeta in lista for t in versiones(carpeta)]
     if not tiempos:
         return "Historial de la memoria: todavía sin versiones (se guarda al terminar cada respuesta de Claude)."

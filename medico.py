@@ -6,6 +6,7 @@ import math
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -14,8 +15,9 @@ from pathlib import Path
 import cerebro as nucleo
 import configuracion
 import permisos
+import procesos
 from archivos import escribir_atomico, leer_objeto_json
-from textos import cantidad, citar, decimal, miles
+from textos import cantidad, citar, decimal, miles, recortar
 
 TONOS = ("peligro", "aviso", "revisar", "info")
 LINEAS_READ = 2000
@@ -32,6 +34,8 @@ DESCRIPCION_MINIMA = 30
 LARGO_CITA = 120
 TIPOS_MEMORIA = {"user", "feedback", "project", "reference"}
 RE_NOMBRE_DE_ARCHIVO = re.compile(r"[-_.](?:historia|history|archivo|archive|archived)[-_.]?\d+$", re.I)
+RE_PARTE_DE_NOTA = re.compile(r"^(.+)-parte-(\d+)$", re.I)
+PARTES_PARA_REVISAR = 3
 RE_ENLACE_A_NOTA = re.compile(r"\[[^\]\n]*\]\(\s*<?(?:\./)?([^)>#\s]+\.md)[)#>\s]", re.I)
 PRIORIDAD_GRUPO = {f["id"]: f["prioridad"] for f in nucleo.FUENTES if "prioridad" in f}
 
@@ -51,6 +55,9 @@ PROHIBIDOS_EN_RUTA = set("`*<>|\"?:()\n")
 RE_YA_NO_ESTA = re.compile(r"\bborrad[oa]s?\b|\bse\s+borr[oó]\b|\bno\s+existen?\b|\belimin|\bya\s+no\s+est|\bse\s+sac[oó]\b"
                            r"|\brenombr|\bse\s+movi[oó]\b|\bmovid[oa]s?\b|\bfantasmas?\b", re.I)
 RE_NEGADO = re.compile(r"\bno\s*$", re.I)
+RE_TEMPORAL_DE_CLAUDE = re.compile(r"\\(?:scratchpad|claude(?:-\d+)?)\\")
+RE_TEMP_DE_WINDOWS = re.compile(r"[a-z]:\\users\\[^\\]+\\appdata\\local\\temp\\")
+RE_DICE_TEMPORAL = re.compile(r"\btemporal(?:es)?\b|\btemporary\b|\bscratch\b")
 RE_CIFRA = re.compile(r"(?<![\w.,:/\-#+~(])(\d{1,5})((?:[ \t]+[a-z]+){1,3})")
 RE_CIFRA_RELATIVA = re.compile(r"\b(?:otros|otras|mas\s+de|menos\s+de|unos|unas|casi)\s+$")
 RE_NUMERO_SUELTO = re.compile(r"(?<![\w.,])\d{1,5}(?![\d])")
@@ -75,6 +82,15 @@ RE_PROBLEMA = re.compile(
     r"|\bsigue (?:roto|rota|rotos|fallando|sin)\b|\btodavia no\b|\bse caen?\b|\bse traba\b|\bfallan?\b|\brot[oa]\b|\bbug\b"
     r"|\bdoes ?n[o']?t (?:work|show)\b|\bbroken\b|\bnot working\b")
 RE_BIEN = re.compile(r"\b(?:no|nunca|sin|ni) (?:se (?:caen?|traba)|fallan?|rot[oa]|bug)\b")
+RE_DESCRIBE = re.compile(
+    r"\b(?:cada|la|una|esa|esta|otra|primera|ultima|sola|toda)\s+fallan?\b|\bmas\s+de\s+[\d.,]+\s+(?:\w+\s+)?fallan?\b"
+    r"|\b(?:si|cuando|apenas)\b[^,.;:()]{0,60}?\bfallan?\b"
+    r"|\b(?:venia|venian|estaba|estaban|era|eran|quedaba|quedaban)\s+(?:\w+\s+)?rot[oa]s?\b"
+    r"|\b(?:el|la|los|las)\s+(?:formato|archivo|archivos)\b(?:\s+(?:del|de la|de los|de)\s+\w+)?\s+no\s+(?:guarda|lee|trae)\b")
+RE_A_PROPOSITO = re.compile(r"\ba proposito\b|\bpor diseno\b|\badrede\b|\bpero es solo\b")
+RE_ROTULO_DE_HALLAZGO = re.compile(
+    r"(?:^[\s>*+-]*|\*\*)(?:problemas?|verificador|nota del verificador|riesgos?|bug)\s*\**:|\bvulnerab|\bhallazgo"
+    r"|^\s*\|\s*\**[a-z]{1,3}-?\d{1,3}\**\s*\|")
 RE_RESUELTO_CERCA = re.compile(r"arreglad|resuelt|\bhech[oa]\b|✅|~~|\bfixed\b|\bsolved\b|\bya (?:anda|aparece|sale|funciona)")
 RE_RESUELTO = re.compile(f"{RE_RESUELTO_CERCA.pattern}|corregid")
 RE_SIN_TOCAR = re.compile(r"\bsin tocar\b|\bqueda(?:n)? (?:igual|pendientes?|como est)|\bno se toca(?:n)?\b"
@@ -161,6 +177,7 @@ CACHE_COMMITS_LEIDA = []
 HECHOS = nucleo.DATOS / "hechos.json"
 DESCARTADOS = nucleo.DATOS / "descartados.json"
 TONOS_DESCARTABLES = ("revisar",)
+RE_FAMILIA = re.compile(r"(?:-(?:parte|historia)-\d+)+(?=\.md$)")
 RE_CADENA_CS = re.compile(r'"(?:[^"\\\n]|\\.)*"')
 TIPOS_HECHO = ("lineas", "archivos", "carpetas", "no_utf8", "cadenas_en_bloque")
 
@@ -364,9 +381,8 @@ def consultar_commits(hashes, repos=None, espera=5.0):
 
         def consultar(repo):
             try:
-                proceso = subprocess.run(["git", "-C", repo, "cat-file", "--batch"], input=entrada,
-                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=espera,
-                                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                proceso = procesos.correr(["git", "-C", repo, "cat-file", "--batch"], timeout=espera, input=entrada,
+                                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             except (OSError, subprocess.SubprocessError):
                 return
             if proceso.returncode == 0:
@@ -522,8 +538,12 @@ def rutas_rotas(ruta_nota, texto, antes=""):
 
 
 def destinos_de_enlaces(texto):
-    salida = [m.group(1).strip() for m in nucleo.RE_WIKI.finditer(texto)]
+    codigo = nucleo.tramos_de_codigo(texto)
+    wiki = (m.group(1).strip() for m in nucleo.RE_WIKI.finditer(texto) if not nucleo.en_codigo(codigo, m.start()))
+    salida = [d for d in wiki if not nucleo.RE_ADJUNTO.search(d)]
     for m in nucleo.RE_ENLACE.finditer(texto):
+        if nucleo.en_codigo(codigo, m.start()):
+            continue
         destino = m.group(2).strip()
         if destino.startswith("<") and destino.endswith(">"):
             destino = destino[1:-1].strip()
@@ -552,9 +572,27 @@ def enlaces_rotos(ruta_nota, texto, antes=""):
     return [d for d in dudosos if d in rotos]
 
 
+def carpetas_temporales():
+    candidatas = [tempfile.gettempdir()] + [os.environ.get(n) for n in ("TEMP", "TMP", "TMPDIR")]
+    if os.sep == "/":
+        candidatas += ["/tmp", "/var/tmp"]
+    return {nucleo.normalizar(r) for c in candidatas if c for r in (c, os.path.realpath(c))}
+
+
+def carpeta_temporal(clave, temporales, propias):
+    if any(clave.startswith(f"{r}\\") for r in propias):
+        return None
+    if not RE_TEMP_DE_WINDOWS.match(clave) and not any(clave.startswith(f"{r}\\") for r in temporales):
+        return None
+    return "de una sesión de Claude" if RE_TEMPORAL_DE_CLAUDE.search(clave) else "del sistema"
+
+
 def regla_rutas(cerebro, rutas):
     salida = []
     fuera = {}
+    temporales = carpetas_temporales()
+    propias = {nucleo.normalizar(r) for f in nucleo.FUENTES for r, _, _ in f["raices"]} | {
+        nucleo.normalizar(r) for r, _ in nucleo.RAICES_PROYECTO}
     for nodo in cerebro.nodos:
         origen = nodo["id"]
         cuerpo = nodo["_cuerpo"]
@@ -569,11 +607,22 @@ def regla_rutas(cerebro, rutas):
                 continue
             vistos.add(clave)
             if existe:
-                if nucleo.excluido(clave) or nucleo.dentro_de_fuentes(clave) or not absoluta:
+                if (nucleo.excluido(clave) or nucleo.dentro_de_fuentes(clave) or not absoluta or nucleo.es_oculta(ruta)
+                        or carpeta_temporal(clave, temporales, propias)):
                     continue
                 fuera.setdefault(clave, (ruta, []))[1].append((origen, linea_en(nodo, inicio)))
                 continue
-            if historica or RE_YA_NO_ESTA.search(alrededor(cuerpo, inicio, fin - inicio + 80)):
+            cerca = alrededor(cuerpo, inicio, fin - inicio + 80)
+            if historica or RE_YA_NO_ESTA.search(cerca):
+                continue
+            temporal = carpeta_temporal(clave, temporales, propias)
+            if temporal:
+                if not RE_DICE_TEMPORAL.search(sin_tildes(cerca)):
+                    salida.append(hallazgo(
+                        "rutaVieja", origen, linea_en(nodo, inicio), "revisar",
+                        f"Nombra {ruta}, que no existe: está en la carpeta temporal {temporal}, que se borra sola.",
+                        "Nadie la puede recuperar: sacar la ruta, o decir en el mismo renglón que era temporal. Si lo que "
+                        "había ahí hacía falta, la próxima vez guardarlo en una carpeta fija."))
                 continue
             salida.append(hallazgo(
                 "rutaVieja", origen, linea_en(nodo, inicio), "aviso",
@@ -645,45 +694,86 @@ def regla_commits(cerebro, repos=None):
     return salida
 
 
+def sin_partir_por_la_pasada():
+    import dormir
+    return {nucleo.normalizar(s["nota"]): str(s.get("motivo") or "no dijo por qué")
+            for s in dormir.leer(nucleo.DATOS).get("sin_partir") or []
+            if isinstance(s, dict) and s.get("nota") and not s.get("espera") and not s.get("indice")}
+
+
 def regla_tamano(cerebro):
     salida = []
+    sola = nucleo.CONFIG.get("partir_sola")
+    trabadas = sin_partir_por_la_pasada() if sola else {}
+    comando = configuracion.comando()
+    sola_y_lo_avisa = (f"la pasada de cada día la parte sola y lo avisa ({comando} --partir-llenas lo hace ahora): las "
+                       "entradas viejas van a una nota de historia y, si no tiene, la segunda mitad a una «parte 2»")
     for nodo in cerebro.nodos:
         tokens = int(nodo["bytes"] / BYTES_POR_TOKEN)
         lineas = nodo["lineas"]
+        memoria = cerebro.fuente_de[nodo["id"]].get("memoria")
+        la_parte = sola and memoria and nodo["tipo"] != "indice" and not nucleo.es_archivo(nodo)
+        trabada = trabadas.get(nucleo.normalizar(nodo["ruta"])) if la_parte else None
+        a_mano = f'{comando} --partir "{Path(nodo["ruta"]).name}" lista sus piezas y arma el cambio sin perder un renglón.'
         if lineas <= LINEAS_READ and tokens <= TOKENS_READ:
             lleno = max(lineas / LINEAS_READ, tokens / TOKENS_READ)
-            sola = nucleo.CONFIG.get("partir_sola")
             if (lleno * 100 >= (sola or configuracion.PARTIR_SOLA)["desde"] and nodo["tipo"] != "indice"
-                    and cerebro.fuente_de[nodo["id"]].get("memoria") and not nucleo.es_archivo(nodo)):
+                    and memoria and not nucleo.es_archivo(nodo)):
                 salida.append(hallazgo(
                     "casiLlena", nodo["id"], 1, "revisar",
                     f"Es una memoria y está al {int(lleno * 100)} % del tope de un Read (~{miles(tokens)} de "
                     f"{miles(TOKENS_READ)} tokens): si sigue creciendo, Read va a mostrar solo el principio.",
-                    (f"La pasada de cada día la parte sola y lo avisa ({configuracion.comando()} --partir-llenas lo hace "
-                     "ahora): las entradas viejas van a una nota de historia y, si no tiene, la segunda mitad a una "
-                     "«parte 2». A mano: " if sola else "")
-                    + f'{configuracion.comando()} --partir "{Path(nodo["ruta"]).name}" lista sus piezas y arma el cambio '
-                    "sin perder un renglón."))
+                    (f"La pasada de cada día no la pudo partir sola: {trabada}. A mano: " if trabada
+                     else f"{sola_y_lo_avisa[:1].upper()}{sola_y_lo_avisa[1:]}. A mano: " if sola else "") + a_mano))
             continue
         motivos = []
         if lineas > LINEAS_READ:
             motivos.append(f"{miles(lineas)} líneas (Read trae {miles(LINEAS_READ)})")
         if tokens > TOKENS_READ:
             motivos.append(f"~{miles(tokens)} tokens (el tope de Read es {miles(TOKENS_READ)})")
-        if cerebro.fuente_de[nodo["id"]].get("memoria"):
+        if memoria:
             salida.append(hallazgo(
-                "noEntraEnRead", nodo["id"], 1, "aviso",
+                "noEntraEnRead", nodo["id"], 1, "revisar" if la_parte and not trabada else "aviso",
                 f'Es una memoria y no entra en un Read: {" y ".join(motivos)}. Read muestra solo el principio y avisa '
                 "que la vista es parcial, así que lo último que se agregó no se ve de una.",
-                f"Pasar lo viejo a notas de archivo y dejar en esta solo lo vigente (lo decide {QUIEN}). "
-                f'{configuracion.comando()} --partir "{Path(nodo["ruta"]).name}" lista sus piezas y arma el cambio sin '
-                "perder un renglón."))
+                f"La pasada de cada día no la pudo partir sola: {trabada}. Hay que partirla a mano: {a_mano}" if trabada
+                else f"No hace falta tocarla: {sola_y_lo_avisa}." if la_parte
+                else f"Pasar lo viejo a notas de archivo y dejar en esta solo lo vigente (lo decide {QUIEN}). {a_mano}"))
         else:
             salida.append(hallazgo(
                 "noEntraEnRead", nodo["id"], 1, "info",
                 f'Referencia larga: {" y ".join(motivos)}. Read la muestra por partes y avisa que la vista es parcial.',
                 f"Para ir directo a lo que hace falta: {configuracion.comando()} --buscar \"tema\", "
                 "que da la sección y la línea."))
+    return salida
+
+
+def regla_partes(cerebro):
+    familias = {}
+    for nodo in cerebro.nodos:
+        if not cerebro.fuente_de[nodo["id"]].get("memoria") or nodo["tipo"] == "indice" or nucleo.es_archivo(nodo):
+            continue
+        ruta = Path(nodo["ruta"])
+        m = RE_PARTE_DE_NOTA.match(ruta.stem)
+        base, numero = (m.group(1), int(m.group(2))) if m else (ruta.stem, 1)
+        familias.setdefault((nucleo.normalizar(str(ruta.parent)), base.lower()), []).append((numero, nodo))
+    salida = []
+    for partes in familias.values():
+        if len(partes) < PARTES_PARA_REVISAR or not any(numero > 1 for numero, _ in partes):
+            continue
+        partes.sort(key=lambda par: par[0])
+        primera = partes[0][1]
+        total = sum(nodo["bytes"] for _, nodo in partes)
+        nombres = ", ".join(Path(nodo["ruta"]).name for _, nodo in partes[1:])
+        salida.append(hallazgo(
+            "notaEnPartes", primera["id"], 1, "revisar",
+            f"«{primera['titulo'] or Path(primera['ruta']).stem}» ya va en {len(partes)} partes "
+            f"({decimal(total / 1024)} KB entre todas; las otras son {nombres}): como las partes se cortan por lugar, "
+            "lo vigente y lo que falta quedan repartidos, y quien lee solo la primera no lo ve todo.",
+            f"Que la reordene el chat que trabaja ese tema (lo decide {QUIEN}): en la primera, arriba, el estado "
+            "vigente y lo que falta; lo cerrado, a una historia (archivo). "
+            f'{configuracion.comando()} --partir "{Path(primera["ruta"]).name}" lista sus piezas y arma el cambio sin '
+            "perder un renglón."))
     return salida
 
 
@@ -707,6 +797,8 @@ def renglones_largos(nodo):
 def regla_indice(cerebro):
     salida = []
     topes = f"{LINEAS_INDICE} líneas o {BYTES_INDICE // 1000} KB"
+    meta = nucleo.CONFIG.get("indice_meta_kb")
+    en_kb = f"{meta:g}".replace(".", ",") if meta else ""
     for nodo in cerebro.nodos:
         if nodo["tipo"] != "indice":
             continue
@@ -728,24 +820,34 @@ def regla_indice(cerebro):
                                    f"{desde}.",
                                    f"Juntar entradas o acortar ganchos (con OK de {QUIEN}, "
                                    f"porque cambia lo que Claude ve al arrancar).{cuales}"))
-        elif lineas >= AVISO_INDICE or nodo["bytes"] >= AVISO_BYTES_INDICE:
+        elif meta and nodo["bytes"] > meta * 1000:
+            salida.append(hallazgo("presupuestoIndice", nodo["id"], None, "aviso",
+                                   f"{texto} Pasó la meta de {en_kb} KB («indice_meta_kb» en config.json).",
+                                   f"Pensar qué entradas se pueden juntar o acortar para volver a quedar debajo de "
+                                   f"{en_kb} KB.{cuales}"))
+        elif lineas >= AVISO_INDICE or (not meta and nodo["bytes"] >= AVISO_BYTES_INDICE):
             salida.append(hallazgo("presupuestoIndice", nodo["id"], None, "aviso",
                                    f"{texto} Se está acercando al tope que Claude lee al arrancar.",
                                    f"Pensar qué entradas se pueden juntar o acortar antes de llegar a {topes}.{cuales}"))
         else:
-            salida.append(hallazgo("presupuestoIndice", nodo["id"], None, "info", f"{texto} Entra entero.", ""))
+            salida.append(hallazgo("presupuestoIndice", nodo["id"], None, "info",
+                                   f"{texto} Entra entero" + (f" (la meta es {en_kb} KB)." if meta else "."), ""))
+        renglones = nodo.get("_cuerpo", "").split("\n")
         for letras, linea in largos:
-            salida.append(hallazgo("ganchoLargo", nodo["id"], linea, "revisar",
-                                   f"Este renglón del índice tiene {letras} letras. El índice se carga entero al empezar "
-                                   f"cada charla y Claude lee solo las primeras {topes}: con renglones así entran menos "
-                                   "notas.",
+            nota = RE_ENLACE_A_NOTA.search(renglones[linea - nodo.get("_desfase", 0) - 1])
+            cual = f", el de {Path(urllib.parse.unquote(nota.group(1))).name}," if nota else ""
+            salida.append(hallazgo("ganchoLargo", nodo["id"], linea, "aviso",
+                                   f"Este renglón del índice{cual} tiene {letras} letras. El índice se carga entero al "
+                                   f"empezar cada charla y Claude lee solo las primeras {topes}: con renglones así entran "
+                                   "menos notas.",
                                    f"Dejar un gancho de hasta unas {LARGO_GANCHO} letras (qué es la nota y por dónde "
                                    "retomar) y pasar el estado y el detalle a la nota."))
     for x in cerebro.indice_roto:
         indice = cerebro.por_id.get(x["indice"])
         linea = None
         if indice:
-            posicion = indice["_cuerpo"].find(x["destino"])
+            posicion = cerebro.lugar_roto.get((x["indice"], x["destino"].lower(), "indice"),
+                                              indice["_cuerpo"].find(x["destino"]))
             linea = linea_en(indice, posicion) if posicion >= 0 else None
         salida.append(hallazgo("indiceRoto", x["indice"], linea, "peligro",
                                f'El índice apunta a {citar(x["destino"], LARGO_CITA)}, que no existe.',
@@ -754,7 +856,8 @@ def regla_indice(cerebro):
         nota = cerebro.por_id.get(x["de"])
         if x["clase"] == "indice" or nota is None:
             continue
-        posicion = nota["_cuerpo"].find(x["destino"])
+        posicion = cerebro.lugar_roto.get((x["de"], x["destino"].lower(), x["clase"]),
+                                          nota["_cuerpo"].find(x["destino"]))
         salida.append(hallazgo("enlaceRoto", x["de"], linea_en(nota, posicion) if posicion >= 0 else None, "aviso",
                                f'Enlaza a {citar(x["destino"], LARGO_CITA)}, que no lleva a ninguna nota.',
                                "Corregir el nombre o la ruta, o sacar el enlace si esa nota ya no existe."))
@@ -795,6 +898,19 @@ def listadas_como_archivo(cerebro):
                 identificador = cerebro.por_ruta.get(nucleo.normalizar(destino))
                 if identificador:
                     salida.setdefault(identificador, Path(indice["ruta"]).name)
+    return salida
+
+
+def regla_copias_de_conflicto(cerebro):
+    salida = []
+    for nodo in cerebro.nodos:
+        original = nucleo.original_de_copia(nodo["ruta"])
+        if original:
+            salida.append(hallazgo(
+                "copiaDeConflicto", nodo["id"], None, "aviso",
+                f"Parece una copia de conflicto de {original.name}: la deja la sincronización (Obsidian Sync, Dropbox, "
+                "Syncthing) cuando la nota cambió en dos equipos a la vez, y las dos quedan con el mismo nombre.",
+                f"Juntar en {original.name} lo que sirva de esta copia y borrar la copia (lo decide {QUIEN})."))
     return salida
 
 
@@ -1030,9 +1146,12 @@ def codigo_nombrado(texto):
     return {c[0] for c in map(buscador.cita_de_codigo, buscador.RE_CODIGO.finditer(texto)) if c}
 
 
-def deja_sin_tocar(mensaje, propias):
-    return any(RE_SIN_TOCAR.search(sin_tildes(frase)) and len(palabras_utiles(frase) & propias) >= 2
-               for frase in RE_FRASE_COMMIT.split(mensaje))
+def frases_sin_tocar(mensaje):
+    return [palabras_utiles(frase) for frase in RE_FRASE_COMMIT.split(mensaje) if RE_SIN_TOCAR.search(sin_tildes(frase))]
+
+
+def deja_sin_tocar(mensaje, propias, frases=None):
+    return any(len(palabras & propias) >= 2 for palabras in (frases_sin_tocar(mensaje) if frases is None else frases))
 
 
 def sangria_de(renglon):
@@ -1055,6 +1174,15 @@ def item_de(renglones, i, desde, hasta):
     return j, k
 
 
+def dice_un_problema(normal):
+    queja = RE_BIEN.sub(" ", normal)
+    if not RE_PROBLEMA.search(queja):
+        return False
+    if RE_ROTULO_DE_HALLAZGO.search(normal):
+        return True
+    return not RE_A_PROPOSITO.search(normal) and bool(RE_PROBLEMA.search(RE_DESCRIBE.sub(" ", queja)))
+
+
 def problemas_de(nodo):
     renglones = nodo["_cuerpo"].split("\n")
     posiciones, desde, hasta = [], [], [0] * len(renglones)
@@ -1073,7 +1201,7 @@ def problemas_de(nodo):
     salida = []
     for i, renglon in enumerate(renglones):
         normal = sin_tildes(renglon)
-        if not RE_PROBLEMA.search(RE_BIEN.sub(" ", normal)) or RE_RESUELTO.search(normal):
+        if not dice_un_problema(normal) or RE_RESUELTO.search(normal):
             continue
         a, b = max(desde[i], i - VENTANA_RESUELTO), min(hasta[i], i + VENTANA_RESUELTO)
         cerca = renglones[a:b + 1]
@@ -1137,6 +1265,7 @@ def regla_resuelto(cerebro, repos=None):
         for palabra in c["palabras"]:
             veces[palabra] = veces.get(palabra, 0) + 1
     fechas = fechas_de_renglones({ruta: [p["linea"] for p in lista] for ruta, (_, lista) in candidatos.items()}, repos)
+    quietas = {}
     salida = []
     for ruta, (nodo, problemas) in candidatos.items():
         clave = nucleo.normalizar(ruta)
@@ -1153,8 +1282,6 @@ def regla_resuelto(cerebro, repos=None):
                     continue
                 if nombrados and not nombrados & {os.path.basename(t).lower() for t in c["tocados"]}:
                     continue
-                if deja_sin_tocar(c.get("mensaje", ""), propias):
-                    continue
                 comunes = propias & c["palabras"]
                 raras = [w for w in comunes if veces[w] <= PALABRA_RARA]
                 if not raras or not comunes & del_renglon or not propias & c["delAsunto"]:
@@ -1162,7 +1289,12 @@ def regla_resuelto(cerebro, repos=None):
                 puntaje = sum(math.log(len(commits) / veces[w]) for w in comunes)
                 if len(raras) < RARAS_EN_COMUN and puntaje < PUNTAJE_CON_UNA_RARA:
                     continue
-                if puntaje >= PUNTAJE_RESUELTO and puntaje > mejores.get(p["bloque"], (0.0,))[0]:
+                if puntaje < PUNTAJE_RESUELTO or puntaje <= mejores.get(p["bloque"], (0.0,))[0]:
+                    continue
+                mensaje = c.get("mensaje", "")
+                if mensaje not in quietas:
+                    quietas[mensaje] = frases_sin_tocar(mensaje)
+                if not deja_sin_tocar(mensaje, propias, quietas[mensaje]):
                     mejores[p["bloque"]] = (puntaje, p, c)
         for _, p, c in sorted(mejores.values(), key=lambda x: x[1]["linea"]):
             asunto = citar(c["asunto"].replace(". ", "; "), LARGO_CITA)
@@ -1196,7 +1328,8 @@ def alcance(cerebro):
 def regla_huerfanas(cerebro, saltos):
     con_entrada = {a for (de, a) in cerebro.fuertes if de != a} | set(cerebro.sin_indice)
     salida = []
-    inalcanzables = [n for n in cerebro.nodos if n["id"] not in saltos]
+    cuentan = [n for n in cerebro.nodos if cerebro.fuente_de[n["id"]].get("huerfanas", True)]
+    inalcanzables = [n for n in cuentan if n["id"] not in saltos]
     for nodo in inalcanzables:
         if nodo["tipo"] in ("indice", "instrucciones", "handoff") or nodo["id"] in con_entrada:
             continue
@@ -1209,7 +1342,7 @@ def regla_huerfanas(cerebro, saltos):
         handoffs = sum(1 for n in inalcanzables if n["tipo"] == "handoff")
         salida.append(hallazgo(
             "alcance", indice_principal(cerebro), None, "info",
-            f"{len(inalcanzables)} de {len(cerebro.nodos)} notas no se alcanzan siguiendo enlaces desde MEMORY.md "
+            f"{len(inalcanzables)} de {len(cuentan)} notas no se alcanzan siguiendo enlaces desde MEMORY.md "
             "y los CLAUDE.md" + (f" ({handoffs} son handoffs)" if handoffs else "") + ".",
             ""))
     return salida
@@ -1251,8 +1384,14 @@ def regla_memorias_parecidas(cerebro):
         if par.get("partesDe"):
             salida.append(hallazgo(
                 "memoriasParecidas", par["a"], None, "info",
-                f'Se parece a {Path(cerebro.por_id[par["b"]]["ruta"]).name}, pero son partes de {par["partesDe"]}, '
-                "partidas a propósito.", ""))
+                f'Se parece a {Path(cerebro.por_id[par["b"]]["ruta"]).name}, pero son partes de la misma memoria '
+                f'({par["partesDe"]}), partidas a propósito.', ""))
+            continue
+        if par.get("hermanas") == "plantilla":
+            salida.append(hallazgo(
+                "memoriasParecidas", par["a"], None, "info",
+                f'Se parece a {Path(cerebro.por_id[par["b"]]["ruta"]).name}, pero las dos llevan número (partes o '
+                "listas de una serie): no hace falta fusionarlas.", ""))
             continue
         salida.append(hallazgo(
             "memoriasParecidas", par["a"], None, "revisar",
@@ -1262,11 +1401,10 @@ def regla_memorias_parecidas(cerebro):
     return salida
 
 
-def correr_git(repo, argumentos, espera=5.0):
+def correr_git(repo, argumentos, espera=5.0, entrada=None):
     try:
-        proceso = subprocess.run(["git", "-C", repo] + argumentos, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                 text=True, encoding="utf-8", errors="replace", timeout=espera,
-                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        proceso = procesos.correr(["git", "-C", repo] + argumentos, timeout=espera, input=entrada, stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace")
     except (OSError, subprocess.SubprocessError):
         return None
     return proceso.stdout if proceso.returncode == 0 else None
@@ -1746,12 +1884,17 @@ def hunks_de_diff(salida):
     return por_archivo
 
 
-def commits_por_archivo(repo, relativas):
-    salida = correr_git(repo, ["-c", "core.quotePath=false", "log", "--format=%x01%H %ct", "--name-only", "--"]
-                        + [":(literal)" + r for r in sorted(relativas)], espera=30)
+def commits_por_archivo(repo, relativas, espera=30, corto=False):
+    if not relativas:
+        return {}
+    salida = correr_git(repo, ["-c", "core.quotePath=false", "log", f"--format=%x01%{'h' if corto else 'H'} %ct",
+                               "--name-only", "--stdin"], espera=espera,
+                        entrada="--\n" + "".join(f":(literal){r}\n" for r in sorted(relativas)))
+    if salida is None:
+        return None
     por_archivo = {}
     actual = None
-    for linea in (salida or "").split("\n"):
+    for linea in salida.split("\n"):
         if linea.startswith("\x01"):
             partes = linea[1:].split()
             actual = (partes[0], int(partes[1])) if len(partes) == 2 and partes[1].isdecimal() else None
@@ -1787,7 +1930,7 @@ def anclas_movidas(candidatas, repos=None, cache=None):
             relativa = os.path.relpath(c["archivo"], repo).replace("\\", "/")
             asignadas.append([c, repo, relativa, cuando, commits[llave], None])
             por_repo.setdefault(repo, set()).add(relativa)
-    historias = {repo: commits_por_archivo(repo, relativas) for repo, relativas in por_repo.items()}
+    historias = {repo: commits_por_archivo(repo, relativas) or {} for repo, relativas in por_repo.items()}
     for asignada in asignadas:
         _, repo, relativa, cuando, _, _ = asignada
         cerca = [sha for sha, t in historias[repo].get(relativa, ()) if cuando < t <= cuando + VENTANA_TRABAJO]
@@ -1995,18 +2138,12 @@ def historia_anclas(marcadas, repos=None):
     repos_log = sorted(pedidos)
 
     def log(repo):
-        salida = correr_git(repo, ["log", "--format=%x01%h %ct", "--name-only", "--"]
-                            + [":(literal)" + a for a in sorted(pedidos[repo])])
-        if salida is None:
+        por_archivo = commits_por_archivo(repo, pedidos[repo], espera=5.0, corto=True)
+        if por_archivo is None:
             return None
         cambios = {}
-        actual = None
-        for linea in salida.split("\n"):
-            if linea.startswith("\x01"):
-                partes = linea[1:].split()
-                actual = (partes[0], int(partes[1])) if len(partes) == 2 and partes[1].isdecimal() else None
-            elif linea.strip() and actual:
-                cambios.setdefault(linea.strip().lower(), []).append(actual)
+        for archivo, commits in por_archivo.items():
+            cambios.setdefault(archivo.lower(), []).extend(commits)
         return cambios
 
     tareas = [lambda c=c: culpa_de_lineas(c[0], c[1], por_nota[c]) for c in claves] + [lambda r=r: log(r) for r in repos_log]
@@ -2393,15 +2530,23 @@ def cargar_descartados(ruta=None):
         if isinstance(lista, list) else []
 
 
+def clave_guardada(d):
+    return d["regla"], nucleo.normalizar(d["ruta"]), d["huella"]
+
+
+def en_familia(clave):
+    return clave and (clave[0], RE_FAMILIA.sub("", clave[1]), clave[2])
+
+
 def separar_descartados(cerebro, hallazgos, descartados=None):
     descartados = cargar_descartados() if descartados is None else descartados
     if not descartados:
         return hallazgos, []
-    claves = {(d["regla"], nucleo.normalizar(d["ruta"]), d["huella"]) for d in descartados}
+    claves = {en_familia(clave_guardada(d)) for d in descartados}
     leidos = {}
     vigentes, aparte = [], []
     for h in hallazgos:
-        (aparte if clave_descarte(cerebro, h, leidos) in claves else vigentes).append(h)
+        (aparte if en_familia(clave_descarte(cerebro, h, leidos)) in claves else vigentes).append(h)
     return vigentes, aparte
 
 
@@ -2427,6 +2572,8 @@ def revisar(cerebro, saltos=None, filtrar=True):
     hallazgos += regla_frontmatter(cerebro)
     hallazgos += regla_rutas(cerebro, rutas)
     hallazgos += regla_tamano(cerebro)
+    hallazgos += regla_partes(cerebro)
+    hallazgos += regla_copias_de_conflicto(cerebro)
     hallazgos += regla_cifras(cerebro)
     hallazgos += regla_probado(cerebro)
     hallazgos += regla_huerfanas(cerebro, saltos)
@@ -2471,6 +2618,83 @@ ETIQUETA = {"peligro": "GRAVE  ", "aviso": "AVISO  ", "revisar": "REVISAR", "inf
 NOMBRE_DEL_TONO = {"peligro": ("grave", "graves"), "aviso": ("aviso", "avisos"), "revisar": ("para revisar", "para revisar"),
                    "info": ("dato", "datos")}
 SIEMPRE_EN_CONSOLA = {"presupuestoIndice"}
+NOMBRE_EN_GRUPO = {"anclaCorrida": ("ancla corrida", "anclas corridas"),
+                   "rutaVieja": ("ruta que ya no existe", "rutas que ya no existen"),
+                   "commitInexistente": ("commit que no existe", "commits que no existen"),
+                   "huellaProbable": ("huella que parece un commit", "huellas que parecen commits"),
+                   "yaResuelto": ("problema que quizás ya está resuelto", "problemas que quizás ya están resueltos"),
+                   "cifras": ("cifra que no coincide", "cifras que no coinciden"),
+                   "hecho": ("cifra de control que cambió", "cifras de control que cambiaron")}
+RENGLONES_A_LA_VISTA = 4
+LARGO_EJEMPLO = 160
+
+
+def uso_de_notas(cerebro):
+    try:
+        import aprender_comun
+        import aprender_pista
+        aprendido = aprender_pista.cargar() if aprender_comun.prendido() else None
+    except Exception:
+        return {}
+    if aprendido is None:
+        return {}
+    uso = {}
+    for nodo in cerebro.nodos:
+        if nodo.get("ruta"):
+            c = aprender_comun.clave(nodo["ruta"])
+            uso[nodo["id"]] = aprendido.veces.get(c, 0.0) + (aprendido.pistas.get(c) or (0.0, 0.0))[0]
+    return uso
+
+
+def arreglos_listos():
+    try:
+        import dormir
+        propuestas = dormir.leer(nucleo.DATOS).get("propuestas") or []
+    except Exception:
+        return {}
+    listos = {}
+    for p in propuestas:
+        if isinstance(p, dict) and p.get("tipo") != "mirar" and isinstance(p.get("numero"), int) and p.get("ruta"):
+            listos.setdefault((nucleo.normalizar(p["ruta"]), p.get("linea") or 0), p["numero"])
+    return listos
+
+
+def filas_juntas(hallazgos, uso):
+    filas, primera = {}, {}
+    for i, h in enumerate(hallazgos):
+        clave = (h["tono"], h["regla"], h["nota"]) if h["nota"] else (i,)
+        filas.setdefault(clave, []).append(h)
+        primera.setdefault(clave, i)
+    return [filas[c] for c in sorted(filas, key=lambda c: (TONOS.index(filas[c][0]["tono"]),
+                                                           -uso.get(filas[c][0]["nota"], 0.0), primera[c]))]
+
+
+def texto_fila(cerebro, fila, listos):
+    h = fila[0]
+    nodo = cerebro.por_id.get(h["nota"]) if h["nota"] else None
+    ruta = nodo["ruta"] if nodo else "(general)"
+    numeros = sorted({listos[k] for g in fila for k in [(nucleo.normalizar(ruta), g["linea"] or 0)] if k in listos}) \
+        if nodo else []
+    lista = ",".join(map(str, numeros))
+    if len(fila) == 1:
+        texto = f'{ETIQUETA[h["tono"]]} {ruta}' + (f':{h["linea"]}' if h["linea"] else "") + f' — {h["texto"]}'
+        if h["arreglo"]:
+            texto += f' → {h["arreglo"]}'
+        if numeros:
+            texto += (f" Arreglo listo de la pasada de cada noche: {configuracion.comando()} --aplicar {lista} "
+                      f"(lo decide {QUIEN}).")
+        return texto
+    renglones = sorted({g["linea"] for g in fila if g["linea"]})
+    cuales = ", ".join(map(str, renglones[:RENGLONES_A_LA_VISTA]))
+    if len(renglones) > RENGLONES_A_LA_VISTA:
+        cuales += f" y {len(renglones) - RENGLONES_A_LA_VISTA} más"
+    nombre = NOMBRE_EN_GRUPO.get(h["regla"], (f'hallazgo «{h["regla"]}»', f'hallazgos «{h["regla"]}»'))
+    texto = (f'{ETIQUETA[h["tono"]]} {ruta} — {cantidad(len(fila), *nombre)}'
+             + (f" (renglones {cuales})" if renglones else "") + f'. El primero: {recortar(h["texto"], LARGO_EJEMPLO)}')
+    if numeros:
+        texto += (f' → {cantidad(len(numeros), "tiene", "tienen")} el arreglo listo de la pasada de cada noche: '
+                  f"{configuracion.comando()} --aplicar {lista} (lo decide {QUIEN}).")
+    return texto
 
 
 def informe(cerebro, hallazgos, maximo=30, segundos=None, avisos_aparte=0):
@@ -2493,29 +2717,31 @@ def informe(cerebro, hallazgos, maximo=30, segundos=None, avisos_aparte=0):
     if cuentas["revisar"]:
         pie.append(f"Si un «para revisar» ya está comprobado y la nota no necesita cambios: "
                    f"{configuracion.comando()} --descartar-aviso RUTA:LÍNEA (vuelve si el renglón cambia).")
-    lugar = maximo - 1 if maximo else len(hallazgos)
-    if len(hallazgos) <= lugar:
-        mostrar = hallazgos
+    uso = uso_de_notas(cerebro) if maximo else {}
+    filas = filas_juntas(hallazgos, uso) if maximo else [[h] for h in hallazgos]
+    lugar = maximo - 1 if maximo else len(filas)
+    if len(filas) <= lugar:
+        mostrar = filas
     else:
-        fijos = [h for h in hallazgos if h["regla"] in SIEMPRE_EN_CONSOLA]
-        resto = [h for h in hallazgos if h["regla"] not in SIEMPRE_EN_CONSOLA]
-        elegidos = {id(h) for h in fijos + resto[:max(0, lugar - 1 - len(fijos))]}
-        mostrar = [h for h in hallazgos if id(h) in elegidos]
-    for h in mostrar:
-        nodo = cerebro.por_id.get(h["nota"]) if h["nota"] else None
-        donde = (nodo["ruta"] if nodo else "(general)") + (f':{h["linea"]}' if h["linea"] else "")
-        texto = f'{ETIQUETA[h["tono"]]} {donde} — {h["texto"]}'
-        if h["arreglo"]:
-            texto += f' → {h["arreglo"]}'
-        lineas.append(texto)
-    if len(mostrar) < len(hallazgos):
-        vistos = {id(h) for h in mostrar}
+        fijas = [f for f in filas if f[0]["regla"] in SIEMPRE_EN_CONSOLA]
+        resto = [f for f in filas if f[0]["regla"] not in SIEMPRE_EN_CONSOLA]
+        elegidas = {id(f) for f in fijas + resto[:max(0, lugar - 1 - len(fijas))]}
+        mostrar = [f for f in filas if id(f) in elegidas]
+    listos = arreglos_listos() if maximo else {}
+    for fila in mostrar:
+        lineas.append(texto_fila(cerebro, fila, listos))
+    if any(len(f) > 1 for f in mostrar):
+        pie.insert(0, "Los del mismo tipo en una misma nota van en un renglón"
+                      + (", y primero las notas que la pista más usa" if uso else "")
+                      + f"; {configuracion.comando()} --salud --todo los muestra uno por uno.")
+    vistos = {id(h) for f in mostrar for h in f}
+    if len(vistos) < len(hallazgos):
         afuera = {}
         for h in hallazgos:
             if id(h) not in vistos:
                 afuera[h["regla"]] = afuera.get(h["regla"], 0) + 1
         detalle = ", ".join(f"{n} {regla}" for regla, n in sorted(afuera.items(), key=lambda x: (-x[1], x[0])))
-        lineas.append(f"… y {len(hallazgos) - len(mostrar)} más: {detalle}. "
+        lineas.append(f"… y {len(hallazgos) - len(vistos)} más: {detalle}. "
                       f"Para verlos todos acá: {configuracion.comando()} --salud --todo.")
     return lineas + pie
 
@@ -2552,7 +2778,7 @@ def main_descartar_aviso(lugar, motivo=""):
                            f"{configuracion.comando()} --salud."))
         return 2
     lista = cargar_descartados()
-    ya = {(d["regla"], nucleo.normalizar(d["ruta"]), d["huella"]) for d in lista}
+    ya = {clave_guardada(d) for d in lista}
     for h, c in elegidos:
         if c not in ya:
             lista.append({"regla": h["regla"], "ruta": cerebro.por_id[h["nota"]]["ruta"], "linea": h["linea"] or 0,
@@ -2570,11 +2796,19 @@ def main_descartados():
         return 0
     cerebro = nucleo.desde_disco()
     leidos = {}
-    vigentes = {clave_descarte(cerebro, h, leidos) for h in revisar(cerebro, filtrar=False)}
+    vigentes = {}
+    for h in revisar(cerebro, filtrar=False):
+        clave = clave_descarte(cerebro, h, leidos)
+        if clave:
+            vigentes.setdefault(en_familia(clave), []).append((clave[1], h))
     print(f"Avisos del médico descartados a mano: {len(lista)}.")
     for d in lista:
-        sigue = (d["regla"], nucleo.normalizar(d["ruta"]), d["huella"]) in vigentes
-        estado = "callado" if sigue else "ya no aplica (el renglón cambió o el médico dejó de marcarlo)"
+        propia = clave_guardada(d)
+        hallados = vigentes.get(en_familia(propia), [])
+        estado = ("callado" if any(ruta == propia[1] for ruta, _ in hallados)
+                  else "callado; el renglón pasó a " + ", ".join(
+                      f'{Path(cerebro.por_id[h["nota"]]["ruta"]).name}:{h["linea"]}' for _, h in hallados) if hallados
+                  else "ya no aplica (el renglón cambió o el médico dejó de marcarlo)")
         motivo = f' · motivo: {citar(d["motivo"], 160)}' if d.get("motivo") else ""
         donde = d["ruta"] + (f':{d["linea"]}' if d.get("linea") else "")
         print(f'  {donde} · {d["regla"]} · {d.get("fecha", "")} · {estado}{motivo}')

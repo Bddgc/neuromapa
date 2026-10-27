@@ -5,8 +5,8 @@ from collections import Counter
 from pathlib import Path
 
 import cerebro as nucleo
-from archivos import dentro, escribir_atomico
-from textos import cantidad, detalle
+from archivos import dentro, escribir_atomico, estado_generado
+from textos import cantidad, detalle, entre_comillas, recortar, sin_wiki
 
 CARPETA = (".claude", "skills")
 ARCHIVO = "SKILL.md"
@@ -21,16 +21,11 @@ RE_COMIENZO = re.compile(r"(?:RECETA|Receta|Pasos|Procedimiento|C[oó]mo\s+(?:se
 RE_PASO = re.compile(r"^[ \t]*\d{1,2}[.)][ \t]+\S", re.M)
 RE_COMANDO = re.compile(r"`[^`\n]*(?:\.(?:py|ps1|bat|cmd|sh|exe|js|mjs)\b|[ \t]--?\w|\b(?:git|npm|npx|python|dotnet|node|pip|cargo|make) )"
                         r"[^`\n]*`|^[ \t]*(?:```|~~~)\w*[ \t]*$", re.M)
-RE_WIKI = re.compile(r"\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]")
 RE_PROPIA = re.compile(r"^[ \t]+" + MARCA + r":[ \t]*(.*?)[ \t]*$", re.M)
 RE_NUMERADA = re.compile(r"^(.*?):(\d{1,3})$")
 ESTADOS = {"nueva": "no existe todavía", "igual": "ya está escrita y al día",
            "propia": "ya está escrita, pero la memoria cambió: se puede volver a escribir",
            "ajena": "ya hay una skill con ese nombre que no escribió Neuromapa: no se toca"}
-
-
-def recortar(texto, largo):
-    return texto if len(texto) <= largo else texto[:largo - 1].rstrip() + "…"
 
 
 def titulo_de(crudo):
@@ -104,10 +99,6 @@ def nombre_de(receta):
     return re.sub(r"-{2,}", "-", re.sub(r"[^a-z0-9]+", "-", plano)).strip("-")[:LARGO_NOMBRE].strip("-")
 
 
-def entre_comillas(texto):
-    return "'" + texto.replace("'", "''") + "'"
-
-
 def texto_de(receta):
     archivo = Path(receta["ruta"]).name
     titulo = receta["titulo"]
@@ -115,7 +106,7 @@ def texto_de(receta):
     cabeza = ["---", f"name: {nombre_de(receta)}", f"description: {entre_comillas(descripcion)}", "metadata:",
               f"  {MARCA}: {entre_comillas(archivo)}", "---", ""]
     cabeza += [] if receta["texto"].lstrip().startswith("#") else [f"# {titulo}", ""]
-    cabeza += [RE_WIKI.sub(r"`\1`", receta["texto"]), "",
+    cabeza += [sin_wiki(receta["texto"], "`{destino}`"), "",
                f"Esta skill es una copia de una receta de la memoria `{archivo}`: si no coinciden, vale la memoria."]
     return "\n".join(cabeza) + "\n"
 
@@ -127,14 +118,7 @@ def destino_de(receta):
 
 
 def estado_de(receta):
-    try:
-        actual = destino_de(receta).read_bytes().decode("utf-8", errors="replace").replace("\r\n", "\n")
-    except OSError:
-        return "nueva"
-    if actual == texto_de(receta):
-        return "igual"
-    cabeza = actual.split("\n---\n", 1)[0] if actual.startswith("---\n") and "\n---\n" in actual else ""
-    return "propia" if RE_PROPIA.search(cabeza) else "ajena"
+    return estado_generado(destino_de(receta), texto_de(receta), RE_PROPIA)
 
 
 def codigo_de(receta):

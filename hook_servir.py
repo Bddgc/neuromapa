@@ -27,6 +27,9 @@ RE_FRASE = re.compile(r"[.;:?!¿¡\n]+(?:\s|$)|\n")
 TOPE = 2500
 DECISIONES_EN_RECORTE = 2
 CONFIG_ROTA = "config-rota.json"
+DADAS_CODEX = "codex-servidas.json"
+SESIONES_CODEX = 50
+TRAMOS_CODEX = 200
 MOTIVOS = {"palabras": "p", "indice": "i", "aprendida": "a"}
 ESPERA_SERVIDOR = 2.0
 LIMITE_INDICE = 8.0
@@ -122,7 +125,7 @@ def anotar_aviso(sesion, cwd, resultado, texto, sin=False):
     mostrado = [c for c in resultado.get("comprobar", ()) if c["archivo"] in texto]
     notas = [p["ruta"] for p in leidas]
     aprendidas = [p["ruta"] for p in leidas if p.get("aprendida")]
-    codigo = [c["archivo"].split(":", 1)[0] for c in mostrado if not c.get("abrir")]
+    codigo = [c.get("ubicacion") or c["archivo"].split(":", 1)[0] for c in mostrado if not c.get("abrir")]
     codigo_aprendido = [c["abrir"] for c in mostrado if c.get("abrir")]
     motivos = [(MOTIVOS.get(p.get("motivo"), "a" if p.get("aprendida") else "p"), p.get("linea"), p.get("fin"),
                 p.get("origen") or "") for p in leidas]
@@ -133,7 +136,20 @@ def anotar_aviso(sesion, cwd, resultado, texto, sin=False):
         hooks_comun.fallo()
 
 
-def contexto(prompt, cwd="", servidor=True, sesion=""):
+def con_dadas(resultado, dadas):
+    rutas = {r for r, _, _ in dadas}
+    leer = [dict(p, servida=True, repetida=(os.path.normcase(p["ruta"]), p.get("linea"), p.get("fin")) in dadas)
+            if os.path.normcase(p["ruta"]) in rutas else p for p in resultado.get("leerPrimero", ())]
+    return dict(resultado, leerPrimero=leer)
+
+
+def sumar_dadas(dadas, resultado, texto, ahora):
+    for p in resultado.get("leerPrimero", ()):
+        if mostrada(p["ruta"], texto):
+            dadas[(os.path.normcase(p["ruta"]), p.get("linea"), p.get("fin"))] = ahora
+
+
+def contexto(prompt, cwd="", servidor=True, sesion="", cargadas=None, dadas=None):
     texto = (prompt or "").strip()
     if not es_pedido(texto) or not prendido():
         return None
@@ -162,10 +178,15 @@ def contexto(prompt, cwd="", servidor=True, sesion=""):
     recuerdo = RECUERDO.format(comando=nucleo.configuracion.comando(),
                                usuario=nucleo.CONFIG.get("usuario") or "el usuario") if nombra_lo_dicho(texto) else ""
     resultado = pista_de(texto, buscar)
-    salida = armar(resultado, ya_cargadas(cwd, nucleo.configuracion.carpeta_de_claude()),
-                   TOPE - len(recuerdo) - 1 if recuerdo else TOPE) if resultado is not None else ""
+    if resultado is not None and dadas:
+        resultado = con_dadas(resultado, dadas)
+    if cargadas is None:
+        cargadas = ya_cargadas(cwd, nucleo.configuracion.carpeta_de_claude())
+    salida = armar(resultado, cargadas, TOPE - len(recuerdo) - 1 if recuerdo else TOPE) if resultado is not None else ""
     if salida:
         anotar_aviso(sesion, cwd, resultado, salida, estado["sin"])
+        if dadas is not None:
+            sumar_dadas(dadas, resultado, salida, time.time())
         return f"{salida}\n{recuerdo}" if recuerdo else salida
     return SOLO_RECUERDO + recuerdo if recuerdo else None
 
@@ -183,7 +204,11 @@ def es_largo(texto):
 
 
 def frases_de(texto):
-    return [f.strip() for f in RE_FRASE.split(texto) if terminos_suficientes(f)][:FRASES]
+    todas = [f.strip() for f in RE_FRASE.split(texto) if terminos_suficientes(f)]
+    if len(todas) <= FRASES:
+        return todas
+    primeras = FRASES // 2
+    return todas[:primeras] + todas[primeras - FRASES:]
 
 
 def pista_de(texto, buscar):
@@ -320,6 +345,10 @@ def armar(resultado, cargadas=frozenset(), tope=TOPE):
     tramos = [(os.path.normcase(p["ruta"]), p.get("linea", 0), p.get("fin", 0)) for p in nuevas]
     elegidas = [d for d in resultado.get("decisiones", ()) if nueva(d["ruta"]) and not any(
         r == os.path.normcase(d["ruta"]) and desde <= d["linea"] and d["fin"] <= hasta for r, desde, hasta in tramos)]
+    rutas_nuevas = {r for r, _, _ in tramos}
+    if nuevas and all(p.get("repetida") for p in nuevas) \
+            and all(os.path.normcase(d["ruta"]) in rutas_nuevas for d in elegidas):
+        return ""
     carpeta = carpeta_repetida([p["ruta"] for p in nuevas] + [d["ruta"] for d in elegidas])
 
     def lugar(p):
@@ -387,6 +416,10 @@ def main():
         if datos.get("hook_event_name") != "UserPromptSubmit":
             return
         pedido, cwd = datos.get("prompt"), datos.get("cwd") or ""
+        if "--codex" in sys.argv[1:]:
+            sesion = datos.get("session_id") or ""
+            hooks_comun.contexto("UserPromptSubmit", (lambda: para_codex(pedido, cwd, sesion),))
+            return
         sesion = datos.get("session_id") or ""
         rota = config_rota(pedido, sesion)
         if rota is not None:
@@ -397,6 +430,50 @@ def main():
                                                   lambda: contexto(pedido, cwd, sesion=sesion)), separador="\n\n")
     except Exception:
         hooks_comun.fallo()
+
+
+def dadas_en_codex(sesion, ahora):
+    from aprender_comun import RECIENTE, prendido
+    if not sesion or not prendido():
+        return None, {}
+    todas = leer_objeto_json(os.path.join(hooks_comun.carpeta_en_vivo(), DADAS_CODEX))
+    vigentes = {}
+    for clave, tramos in todas.items():
+        if isinstance(tramos, list):
+            vivos = [x for x in tramos if isinstance(x, list) and len(x) == 4 and isinstance(x[3], (int, float))
+                     and 0 <= ahora - x[3] < RECIENTE]
+            if vivos:
+                vigentes[clave] = vivos
+    propias = {(x[0], x[1], x[2]): x[3] for x in vigentes.get(str(sesion)[:8], ()) if isinstance(x[0], str)}
+    return vigentes, propias
+
+
+def guardar_dadas_codex(sesion, vigentes, propias):
+    from archivos import escribir_atomico
+    import permisos
+    ordenadas = sorted(propias.items(), key=lambda x: x[1])[-TRAMOS_CODEX:]
+    vigentes = dict(vigentes, **{str(sesion)[:8]: [[r, l, f, t] for (r, l, f), t in ordenadas]})
+    recientes = sorted(vigentes.items(), key=lambda x: max(t[3] for t in x[1]))[-SESIONES_CODEX:]
+    ruta = os.path.join(hooks_comun.carpeta_en_vivo(), DADAS_CODEX)
+    permisos.crear(os.path.dirname(ruta))
+    escribir_atomico(ruta, json.dumps(dict(recientes)))
+
+
+def para_codex(pedido, cwd, sesion=""):
+    import charlas
+    try:
+        vigentes, dadas = dadas_en_codex(sesion, time.time())
+    except Exception:
+        hooks_comun.fallo()
+        vigentes, dadas = None, {}
+    antes = dict(dadas)
+    texto = contexto(pedido, cwd, cargadas=frozenset(), dadas=dadas if vigentes is not None else None)
+    if vigentes is not None and dadas != antes:
+        try:
+            guardar_dadas_codex(sesion, vigentes, dadas)
+        except Exception:
+            hooks_comun.fallo()
+    return charlas.tapar_claves(texto or "", charlas.secretos_propios())
 
 
 def config_rota(pedido, sesion):

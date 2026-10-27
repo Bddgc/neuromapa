@@ -16,6 +16,7 @@ except ImportError:
 
 ESPERA_REEMPLAZO = 2.0
 HOLGURA_RELOJ = 2.0
+MARCA_PAGINA = "/*__PAGINA__*/\n"
 CARPETAS_SENSIBLES = (".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", "gcloud", ".password-store")
 EXTENSIONES_SENSIBLES = ("pem", "key", "pfx", "p12", "ppk", "kdbx", "jks", "keystore", "tfstate", "tfstate.backup",
                          "tfvars", "ovpn")
@@ -67,13 +68,31 @@ def menciona_sensible(texto):
     return bool(propio and propio.search(texto))
 
 
+def abrir_para_escribir(destino, binario):
+    return open(destino, "wb") if binario else open(destino, "w", encoding="utf-8", newline="")
+
+
 def escribir_atomico(ruta, contenido):
     ruta = Path(ruta)
+    if ruta.is_symlink():
+        ruta = Path(os.path.realpath(ruta))
     binario = isinstance(contenido, bytes)
+    try:
+        enlazado = ruta.stat().st_nlink > 1
+    except OSError:
+        enlazado = False
+    if enlazado:
+        with abrir_para_escribir(ruta, binario) as archivo:
+            archivo.write(contenido)
+            archivo.flush()
+            os.fsync(archivo.fileno())
+        return
     fd, temporal = tempfile.mkstemp(dir=ruta.parent, prefix=f".{ruta.name}.", suffix=".tmp")
     try:
-        with os.fdopen(fd, "wb") if binario else os.fdopen(fd, "w", encoding="utf-8", newline="") as archivo:
+        with abrir_para_escribir(fd, binario) as archivo:
             archivo.write(contenido)
+            archivo.flush()
+            os.fsync(archivo.fileno())
         limite = time.monotonic() + ESPERA_REEMPLAZO
         while True:
             try:
@@ -89,6 +108,17 @@ def escribir_atomico(ruta, contenido):
                 os.remove(temporal)
             except OSError:
                 pass
+
+
+def plantilla_entera(ruta):
+    ruta = Path(ruta)
+    html = ruta.read_text(encoding="utf-8-sig")
+    if MARCA_PAGINA not in html:
+        return html
+    partes = sorted((ruta.parent / "pagina").glob("*.js"))
+    if not partes:
+        raise FileNotFoundError(f"la plantilla {ruta} pide el JavaScript de pagina/, y esa carpeta no está a su lado")
+    return html.replace(MARCA_PAGINA, "".join(p.read_text(encoding="utf-8") for p in partes), 1)
 
 
 def tomar_candado(ruta, espera=0.0):
@@ -144,6 +174,17 @@ def dentro(ruta, raiz):
     ruta = os.path.normcase(os.path.abspath(ruta)).rstrip("\\/")
     raiz = os.path.normcase(os.path.abspath(raiz)).rstrip("\\/")
     return ruta == raiz or ruta.startswith(raiz + os.sep)
+
+
+def estado_generado(ruta, esperado, propia):
+    try:
+        actual = Path(ruta).read_bytes().decode("utf-8", errors="replace").replace("\r\n", "\n")
+    except OSError:
+        return "nueva"
+    if actual == esperado:
+        return "igual"
+    cabeza = actual.split("\n---\n", 1)[0] if actual.startswith("---\n") and "\n---\n" in actual else ""
+    return "propia" if propia.search(cabeza) else "ajena"
 
 
 def leer_objeto_json(ruta):

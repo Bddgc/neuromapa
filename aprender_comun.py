@@ -30,7 +30,11 @@ PESO_PISTA = 0.5
 PESO_PROPIO = 0.5
 MINIMO = 0.1
 VECINOS = 30
+VECINOS_GUARDADOS = 90
+DECIMALES = 7
 VISTOS = 300
+VISTOS_CHARLA = 200
+VIDA_CHARLA = 2 * 86400
 PARES = 3000
 DIAS = 14
 TANDA = 100000
@@ -64,7 +68,7 @@ APAGADO = "El aprendizaje está apagado («aprender»: false en config.json): no
 TOQUES = ("leer", "editar", "crear")
 CAMPOS_DIA = ("pedidos", "toques", "pistas", "seguidas", "notas", "notas_ap", "seguidas_ap", "codigo", "codigo_visto",
               "codigo_ap", "codigo_ap_visto", "utiles", "pistas_sa", "utiles_sa", "notas_sa", "seguidas_sa", "codigo_sa",
-              "codigo_visto_sa")
+              "codigo_visto_sa", "medidas_con", "sirvio_con", "medidas_sa", "sirvio_sa", "ap_nuevos", "ap_nuevos_vistos")
 RE_SESION = registro.RE_SESION
 RE_WORKTREE = re.compile(r"[\\/]\.claude[\\/]worktrees[\\/][^\\/]+", re.I)
 RE_AJENO = re.compile(r"/(?:node_modules|\.git|__pycache__|\.next|\.venv|venv|site-packages)/")
@@ -212,7 +216,3 @@ def proyecto_de(c, lista):
 
 def es_de_codigo(c):
     return "." in nombre(c) and c.rsplit(".", 1)[-1] in EXT_CODIGO
-
-
-def decimal(x):
-    return format(x, ".2f").replace(".", ",")

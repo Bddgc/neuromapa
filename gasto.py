@@ -1,5 +1,6 @@
 import datetime
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -15,6 +16,8 @@ ABANDONADO = 2 * HORA
 CAMPOS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 MARCA_USO = b'"usage"'
 JOURNAL = "journal.jsonl"
+BLOQUE = 4 * 1024 * 1024
+RE_HORA = re.compile(rb'"timestamp"\s*:\s*"([^"]+)"')
 
 
 def epoca(texto):
@@ -32,10 +35,30 @@ def total(uso):
     return sum(uso.values())
 
 
+def inicio_reciente(f, fin, desde):
+    pos = fin
+    while pos > 0:
+        pos = max(0, pos - BLOQUE)
+        f.seek(pos)
+        for linea in f.read(BLOQUE).split(b"\n")[1 if pos else 0:]:
+            m = RE_HORA.search(linea)
+            t = epoca(m.group(1).decode("utf-8", "replace")) if m else None
+            if t is not None:
+                if t < desde:
+                    return max(0, pos - BLOQUE)
+                break
+    return 0
+
+
 def uso_de(archivo, desde):
     por_pedido = {}
     try:
         with open(archivo, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            inicio = inicio_reciente(f, f.tell(), desde)
+            f.seek(inicio)
+            if inicio:
+                f.readline()
             for linea in f:
                 if MARCA_USO not in linea:
                     continue

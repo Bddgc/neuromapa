@@ -263,8 +263,10 @@ def forma_base(palabra):
 
 def proyectos_conocidos():
     import consultas
+    datos = nucleo.normalizar(nucleo.DATOS)
+    propias = [c for c in nucleo.carpetas_propias() if not datos.startswith(nucleo.normalizar(c) + "\\")]
     return [(consultas.clave(p["raiz"]).rstrip("/"), p) for p in nucleo.CONFIG["proyectos"]] + \
-        [(consultas.clave(c).rstrip("/"), {"aparte": True}) for c in nucleo.carpetas_propias()]
+        [(consultas.clave(c).rstrip("/"), {"aparte": True}) for c in propias]
 
 
 def separados(lista):
@@ -337,14 +339,12 @@ def secciones_del_indice(cerebro, sin_tipos):
 
 
 def proyectos_de_notas(cerebro):
-    import consultas
-    lista = proyectos_conocidos()
-    salida = {n["id"]: raiz_que_contiene(consultas.clave(n["ruta"]), lista) for n in cerebro.nodos
-              if not cerebro.fuente_de.get(n["id"], {}).get("memoria")}
-    for (_, titulo), nodos in secciones_del_indice(cerebro, SIN_PROYECTO).items():
-        proyecto = proyecto_de_seccion(titulo, nodos, lista)
-        for nodo in nodos:
-            salida[nodo["id"]] = proyecto
+    salida = {}
+    for i, proyecto in proyecto_de_cada_nota(cerebro).items():
+        de_memoria = cerebro.fuente_de.get(i, {}).get("memoria")
+        if proyecto == REGLAS or (de_memoria and cerebro.por_id[i]["tipo"] in SIN_PROYECTO):
+            continue
+        salida[i] = proyecto
     return salida
 
 
@@ -386,10 +386,11 @@ def proyecto_de_cada_nota(cerebro):
             mejor, cuantos = cuenta.most_common(1)[0]
             if cuantos >= VOTOS_NOTA and cuantos >= PARTE_NOTA * sum(cuenta.values()):
                 salida[i] = mejor
-    por_tallo = {Path(n["ruta"]).stem.lower(): n["id"] for n in memorias}
+    por_tallo = {(str(Path(n["ruta"]).parent).lower(), Path(n["ruta"]).stem.lower()): n["id"] for n in memorias}
     de_la_madre = {}
     for nodo in memorias:
-        madre = por_tallo.get(RE_DERIVADA.sub("", Path(nodo["ruta"]).stem.lower()))
+        ruta = Path(nodo["ruta"])
+        madre = por_tallo.get((str(ruta.parent).lower(), RE_DERIVADA.sub("", ruta.stem.lower())))
         if not salida[nodo["id"]] and madre and salida.get(madre):
             de_la_madre[nodo["id"]] = salida[madre]
     salida.update(de_la_madre)
@@ -489,6 +490,10 @@ def idf_de(total, df):
     return math.log(1 + (total - df + 0.5) / (df + 0.5))
 
 
+def mismo_item(renglones, i, m):
+    return not any(RE_ITEM_RAIZ.match(renglones[k]) for k in range(min(i, m) + 1, max(i, m) + 1))
+
+
 def bloques(texto):
     salida = []
     actual = []
@@ -580,8 +585,10 @@ class Indice:
                 "pesoTipo": peso_de_tipo(nodo, cerebro.fuente_de.get(nodo["id"], {})),
                 "secciones": [],
             })
+            alias = " ".join(nodo.get("_alias", []))
             ficha = " ".join((nodo["titulo"], nodo["titulo"], nodo.get("descripcion", ""), nodo.get("slug", ""),
-                              nucleo.Path(nodo["ruta"]).stem, gancho))
+                              nucleo.Path(nodo["ruta"]).stem, gancho, alias, alias,
+                              " ".join(e.replace("/", " ") for e in nodo.get("etiquetas", []))))
             cuenta = contar(ficha)
             self.largos_ficha.append(sum(cuenta.values()) or 1)
             for termino, veces in cuenta.items():
@@ -799,8 +806,16 @@ class Indice:
             inicio, texto = self.secciones[s][2], self.secciones[s][3]
             for desde, renglones in bloques(texto):
                 marcas = [i for i, r in enumerate(renglones) if RE_DECISION.search(sin_marcas(r))]
+                del_pedido = {}
+
+                def nombra_el_pedido(m):
+                    if m not in del_pedido:
+                        del_pedido[m] = bool(self.coincidencias(renglones[m], mapa)[0])
+                    return del_pedido[m]
+
                 for i, renglon in enumerate(renglones):
-                    cerca = [m for m in marcas if abs(i - m) <= VENTANA_DECISION]
+                    cerca = [m for m in marcas if abs(i - m) <= VENTANA_DECISION and mismo_item(renglones, i, m)
+                             and (m == i or nombra_el_pedido(m))]
                     vistos, primera = self.coincidencias(renglon, mapa) if cerca else (set(), None)
                     if not vistos or sum(rareza[j] for j in vistos) < COBERTURA_DECISION * total:
                         continue
@@ -890,7 +905,7 @@ class Indice:
         for _, cita, ruta, linea, clave, escrita, n in elegidos:
             if len(salida) >= COMPROBAR:
                 break
-            ubicacion = self.ubicar(clave, escrita, (aca, self.notas[n].get("proyecto", "")))
+            ubicacion = self.ubicar(clave, escrita, (self.notas[n].get("proyecto", ""), aca))
             if lejos(ubicacion):
                 continue
             entrada = {"archivo": cita, "ruta": ruta, "linea": linea, "ubicacion": ubicacion}
@@ -1197,7 +1212,9 @@ class Indice:
         if memoria is not None and semillas:
             leer += self.leidas_juntas(semillas[0], ya, permitidas, memoria, final, secciones_de, pasajes, mapa, cantidad)
         if memoria is not None:
-            leer = [dict(p, servida=True) if memoria.ya_servida(p["ruta"]) else p for p in leer
+            igual = getattr(memoria, "ya_servido_igual", None)
+            leer = [dict(p, servida=True, repetida=bool(igual and igual(p["ruta"], p["linea"], p["fin"])))
+                    if memoria.ya_servida(p["ruta"]) else p for p in leer
                     if not memoria.ya_leido(p["ruta"], p["linea"], p["fin"])]
         comprobar = self.para_comprobar(final, mapa, rareza, memoria)
         if memoria is not None:

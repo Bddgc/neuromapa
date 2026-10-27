@@ -10,13 +10,14 @@ import os
 import re
 import sys
 import time
+import unicodedata
 import urllib.parse
 from pathlib import Path
 
 import configuracion
 import registro
-from archivos import es_sensible, escribir_atomico
-from textos import cantidad, decimal, detalle
+from archivos import es_sensible, escribir_atomico, plantilla_entera
+from textos import RE_WIKI, cantidad, decimal, detalle, recortar, sin_wiki
 
 CARPETA = Path(__file__).resolve().parent
 MARCADOR = "/*__CEREBRO__*/"
@@ -24,7 +25,8 @@ VENDOR = CARPETA / "vendor"
 RE_LIBRERIA = re.compile(r"const (URL_\w+) = '(https://[^']+)';")
 RE_INTEGRIDAD = re.compile(r"\[(URL_\w+)\]: '(sha384-[A-Za-z0-9+/=]+)'")
 LIMITE_TEXTO = 60000
-NOMBRES_SALUD = {"rotos": "Enlaces rotos", "huerfanos": "Huérfanas", "sinIndice": "Memorias sin índice",
+DIAS_ARREGLADOS = 7
+NOMBRES_SALUD ={"rotos": "Enlaces rotos", "huerfanos": "Huérfanas", "sinIndice": "Memorias sin índice",
                  "indiceRoto": "Índice roto", "ambiguos": "Menciones ambiguas", "handoffsAbiertos": "Handoffs abiertos",
                  "respuestasSinAcuse": "Respuestas sin acuse", "medico": "Del médico", "anclas": "Anclas a revisar",
                  "hechos": "Hechos a revisar", "repiteClaude": "Memorias que repiten el CLAUDE.md",
@@ -60,18 +62,24 @@ LADO_DE_PALABRA = {p: lado["id"] for lado in (HANDOFFS["lados"] if HANDOFFS else
 FUERZA = {"wiki": 0, "indice": 1, "enlace": 2, "responde": 3, "mencion": 4, "carpeta": 5}
 ORDEN_CLASES = ["wiki", "indice", "enlace", "responde", "mencion", "carpeta", "cadena", "sugerida", "parecida", "comparte",
                 "aprendida", "duplicado"]
-NOMBRE_CLASE = {"wiki": "Wiki [[…]]", "indice": "Índice", "enlace": "Enlace", "responde": "Responde", "mencion": "Mención",
+NOMBRE_CLASE = {"wiki": "Enlace [[…]]", "indice": "Índice", "enlace": "Enlace", "responde": "Responde", "mencion": "Mención",
                 "carpeta": "Carpeta", "cadena": "Cadena", "sugerida": "Sugerida", "parecida": "Parecida",
                 "comparte": "Comparte", "aprendida": "Aprendida", "duplicado": "Duplicado"}
-NOMBRE_TIPO = {"instrucciones": "Instrucciones", "indice": "Índice", "user": "Usuario", "feedback": "Feedback",
+NOMBRE_TIPO = {"instrucciones": "Instrucciones", "indice": "Índice", "user": "Usuario", "feedback": "Cómo trabajar",
                "project": "Proyecto", "reference": "Referencia", "doc": "Documento", "handoff": "Handoff"}
 SEPARADORES = "\\/"
 DELIMITADORES = set(" \t\r\n`'\"<>|*?()[]{},;=")
 
 RE_MD = re.compile(r"\.md(?!\w)", re.I)
-RE_WIKI = re.compile(r"\[\[([^\[\]\n|#]{1,150})(?:[|#][^\[\]\n]*)?\]\]")
+RE_COPIA_DE_CONFLICTO = re.compile(r"^(?P<base>.+?)(?: \((?:[^()]*conflicted copy|copia en conflicto)[^()]*\)"
+                                   r"|\.sync-conflict-\d{8}-\d{6}(?:-[A-Za-z0-9]+)?)$", re.I)
+RE_CLAVE_FRONTMATTER = re.compile(r"^(\s*)(\"[^\"\n]+\"|'[^'\n]+'|[\w\-]+(?:[ \t]+[\w\-]+)*)\s*:\s*(.*)$")
+RE_ADJUNTO = re.compile(r"\.(?!md$)[a-z][a-z0-9]{0,7}$", re.I)
+RE_CODIGO_EN_LINEA = re.compile(r"(?<!`)(`+)(?!`).+?(?<!`)\1(?!`)")
+RE_ETIQUETA = re.compile(r"(?<!\S)#([\w/\-]+)")
 RE_ENLACE = re.compile(r"\[([^\[\]\n]*)\]\(\s*(<[^>\n]+>|[^)\s]+)(?:\s+[\"'][^\"'\n]*[\"'])?\s*\)")
 RE_INDICE = re.compile(r"^[ \t]*[-*+][ \t]+\[([^\]\n]+)\]\(\s*<?([^)\s>]+)>?\s*\)[ \t]*(?:[—–-]+[ \t]*)?(.*)$", re.M)
+RE_RENGLON_LISTA = re.compile(r"^[ \t]*[-*+][ \t]+\S.*$", re.M)
 RE_HANDOFF = re.compile(f"(?<![\\w\\-.]){RE_PREFIJO}_(\\d+)(?![\\w\\-])(?!\\.md)", re.I)
 RE_HANDOFF_ARCHIVO = re.compile(f"^{RE_PREFIJO}(?:_(\\d+))?(?:_[^.]*)?\\.md$", re.I)
 RE_TOKEN = re.compile(r"(?<![\w\-])\w+(?:-\w+)+(?![\w\-])")
@@ -123,8 +131,12 @@ def es_historica(nodo):
     return nodo["grupo"] in GRUPOS_HISTORICOS or es_changelog(nodo["ruta"]) or es_archivo(nodo)
 
 
+def nfc(texto):
+    return unicodedata.normalize("NFC", texto)
+
+
 def normalizar(ruta):
-    return os.path.normpath(str(ruta)).replace("/", "\\").lower()
+    return os.path.normpath(nfc(str(ruta))).replace("/", "\\").lower()
 
 
 def es_de_red(ruta):
@@ -139,6 +151,82 @@ def excluido(ruta):
     if any(f in clave for f in FRAGMENTOS_EXCLUIDOS):
         return True
     return "\\.claude\\" in clave and any(clave.startswith(f"{base}\\") for base in CLAUDE_EXCLUIDA)
+
+
+_bovedas = {}
+PLANTILLAS_DE_OBSIDIAN = (((".obsidian", "templates.json"), "folder"),
+                          ((".obsidian", "plugins", "templater-obsidian", "data.json"), "templates_folder"))
+
+
+def filtros_de_obsidian(app):
+    try:
+        with open(app, encoding="utf-8") as f:
+            datos = json.load(f)
+    except (OSError, ValueError):
+        return []
+    filtros = []
+    lista = datos.get("userIgnoreFilters") if isinstance(datos, dict) else None
+    for filtro in lista if isinstance(lista, list) else []:
+        if not isinstance(filtro, str) or not filtro.strip():
+            continue
+        if len(filtro) > 2 and filtro.startswith("/") and filtro.endswith("/"):
+            try:
+                filtros.append(re.compile(filtro[1:-1]))
+            except re.error:
+                continue
+        else:
+            filtros.append(filtro.replace("\\", "/").lstrip("/").lower())
+    return filtros
+
+
+def carpetas_de_plantillas(carpeta):
+    salida = []
+    for partes, clave in PLANTILLAS_DE_OBSIDIAN:
+        try:
+            with open(os.path.join(carpeta, *partes), encoding="utf-8") as f:
+                valor = json.load(f).get(clave)
+        except (OSError, ValueError, AttributeError):
+            continue
+        limpia = valor.replace("\\", "/").strip().strip("/").lower() if isinstance(valor, str) else ""
+        if limpia and limpia != ".":
+            salida.append(limpia + "/")
+    return salida
+
+
+def boveda_de(carpeta):
+    carpeta = os.path.normpath(str(carpeta))
+    if carpeta not in _bovedas:
+        app = os.path.join(carpeta, ".obsidian", "app.json")
+        padre = os.path.dirname(carpeta)
+        if os.path.isdir(os.path.join(carpeta, ".obsidian")):
+            _bovedas[carpeta] = (carpeta, app, filtros_de_obsidian(app) + carpetas_de_plantillas(carpeta))
+        else:
+            _bovedas[carpeta] = boveda_de(padre) if padre != carpeta else None
+    return _bovedas[carpeta]
+
+
+def es_oculta(ruta):
+    if Path(ruta).name.lower().endswith(".excalidraw.md"):
+        return True
+    if es_de_red(ruta):
+        return False
+    boveda = boveda_de(Path(ruta).parent)
+    if not boveda:
+        return False
+    relativa = os.path.relpath(str(ruta), boveda[0]).replace("\\", "/")
+    if any(parte.startswith(".") and parte not in (".", "..") for parte in relativa.split("/")):
+        return True
+    return any(f.search(relativa) if isinstance(f, re.Pattern) else relativa.lower().startswith(f)
+               for f in boveda[2])
+
+
+def original_de_copia(ruta):
+    p = Path(ruta)
+    m = RE_COPIA_DE_CONFLICTO.match(p.stem)
+    if not m:
+        return None
+    original = p.with_name(m.group("base") + p.suffix)
+    return original if original.is_file() else None
 
 
 def carpeta_podada(nombre):
@@ -171,11 +259,11 @@ def fuente_de_ruta(ruta):
             carpetas = clave[len(base) + 1:].split("\\")[:-1]
             if not recursivo:
                 if not carpetas:
-                    return fuente
+                    return None if es_oculta(ruta) else fuente
                 continue
             if any(carpeta_podada(c) for c in carpetas) or saltea_pesada(carpetas):
                 continue
-            return fuente
+            return None if es_oculta(ruta) else fuente
     return None
 
 
@@ -186,6 +274,14 @@ def dentro_de_fuentes(ruta):
 _listados = {}
 podadas = {}
 delicadas = {}
+sin_entrar = {}
+
+
+def no_pude_entrar(error):
+    ruta = str(error.filename or "")
+    if ruta:
+        motivo = "no tengo permiso para leerla" if isinstance(error, PermissionError) else (error.strerror or str(error))
+        sin_entrar[normalizar(ruta)] = (ruta, motivo)
 
 
 def archivo_propio(ruta, raiz):
@@ -207,16 +303,21 @@ def listar(raiz, recursivo, avisar_si_falta=True):
         else:
             salida.append(ruta)
 
-    if not base.is_dir():
+    if not os.path.isdir(base):
         if avisar_si_falta:
             avisar(f"no existe la carpeta {base}")
     elif not recursivo:
-        for p in base.iterdir():
-            if p.suffix.lower() == ".md" and archivo_propio(p, base):
-                sumar(p)
+        try:
+            for p in base.iterdir():
+                if p.suffix.lower() == ".md" and archivo_propio(p, base):
+                    sumar(p)
+        except OSError as error:
+            error.filename = error.filename or str(base)
+            no_pude_entrar(error)
     else:
-        for actual, carpetas, archivos in os.walk(base):
-            carpetas[:] = [c for c in carpetas if not carpeta_podada(c)]
+        en_boveda = not es_de_red(str(base)) and boveda_de(base)
+        for actual, carpetas, archivos in os.walk(base, onerror=no_pude_entrar):
+            carpetas[:] = [c for c in carpetas if not carpeta_podada(c) and not (en_boveda and c.startswith("."))]
             for c in [c for c in carpetas if es_sensible(os.path.join(actual, c))]:
                 delicadas[normalizar(os.path.join(actual, c))] = os.path.join(actual, c)
             carpetas[:] = [c for c in carpetas if not es_sensible(os.path.join(actual, c))]
@@ -236,10 +337,18 @@ def listar(raiz, recursivo, avisar_si_falta=True):
 
 def huella(extras=()):
     _listados.clear()
+    _bovedas.clear()
     vistos = set()
     partes = []
     for fuente in FUENTES:
         for raiz, recursivo, _ in fuente["raices"]:
+            boveda = None if es_de_red(raiz) else boveda_de(raiz)
+            if boveda and boveda[1] not in vistos:
+                vistos.add(boveda[1])
+                partes.append((boveda[1],) + firma(boveda[1]))
+                for camino, _ in PLANTILLAS_DE_OBSIDIAN:
+                    opciones = os.path.join(boveda[0], *camino)
+                    partes.append((opciones,) + firma(opciones))
             for ruta in listar(raiz, recursivo, False):
                 clave = normalizar(ruta)
                 if clave in vistos or excluido(clave):
@@ -263,14 +372,32 @@ def orden_natural(texto):
     return [int(t) if t.isdecimal() else t.lower() for t in re.split(r"(\d+)", texto)]
 
 
-def leer_texto(ruta):
-    crudo = ruta.read_bytes()
-    for codificacion in ("utf-8-sig", "cp1252"):
+def decodificar(crudo):
+    if crudo.startswith((b"\xff\xfe", b"\xfe\xff")):
         try:
-            return crudo.decode(codificacion), len(crudo)
+            return crudo.decode("utf-16"), ("utf16",)
         except UnicodeDecodeError:
-            continue
-    return None, len(crudo)
+            pass
+    try:
+        return crudo.decode("utf-8-sig"), None
+    except UnicodeDecodeError as error:
+        primero = error.start
+    texto = crudo.decode("utf-8-sig", errors="replace")
+    rotos = texto.count("�")
+    if sum(1 for c in texto if ord(c) > 127) - rotos > rotos:
+        return texto, ("rotos", rotos, crudo[:primero].count(b"\n") + 1)
+    try:
+        return crudo.decode("cp1252"), None
+    except UnicodeDecodeError:
+        return None, None
+
+
+def leer_texto(ruta, problemas=None):
+    crudo = ruta.read_bytes()
+    texto, problema = decodificar(crudo)
+    if problema and problemas is not None:
+        problemas.append((str(ruta), problema))
+    return texto, len(crudo)
 
 
 def desentrecomillar(valor):
@@ -301,10 +428,19 @@ def separar_frontmatter(texto):
     for linea in lineas[1:fin]:
         if not linea.strip() or linea.lstrip().startswith("#"):
             continue
-        m = re.match(r"^(\s*)([\w\-]+)\s*:\s*(.*)$", linea)
+        item = re.match(r"^\s*-\s+(.*)$", linea)
+        if item:
+            actual = datos.get(padre) if padre is not None else None
+            if actual == {} or isinstance(actual, list):
+                datos[padre] = (actual or []) + [desentrecomillar(item.group(1))]
+            continue
+        m = RE_CLAVE_FRONTMATTER.match(linea)
         if not m:
+            if not linea[:1].isspace():
+                padre = None
             continue
         sangria, clave, valor = m.groups()
+        clave = clave.strip("\"'")
         if not sangria:
             if valor.strip() == "":
                 datos[clave] = {}
@@ -312,7 +448,7 @@ def separar_frontmatter(texto):
             else:
                 datos[clave] = desentrecomillar(valor)
                 padre = None
-        elif padre is not None:
+        elif padre is not None and isinstance(datos[padre], dict):
             datos[padre][clave] = desentrecomillar(valor)
     if not datos:
         return {}, texto
@@ -324,9 +460,42 @@ def valores_frontmatter(frontmatter):
     for valor in frontmatter.values():
         if isinstance(valor, dict):
             salida.extend(v for v in valor.values() if isinstance(v, str) and v.strip())
+        elif isinstance(valor, list):
+            salida.extend(v for v in valor if isinstance(v, str) and v.strip())
         elif isinstance(valor, str) and valor.strip():
             salida.append(valor)
     return salida
+
+
+def sin_repetir(valores):
+    salida = []
+    for v in valores:
+        if v and v.lower() not in {x.lower() for x in salida}:
+            salida.append(v)
+    return salida
+
+
+def etiquetas_del_texto(texto):
+    codigo = tramos_de_codigo(texto)
+    salida = []
+    for m in RE_ETIQUETA.finditer(texto):
+        etiqueta = m.group(1).strip("/")
+        if etiqueta and not re.fullmatch(r"[\d/\-]+", etiqueta) and not en_codigo(codigo, m.start()):
+            salida.append(etiqueta)
+    return salida
+
+
+def lista_de(frontmatter, clave, por_espacios=False):
+    meta = frontmatter.get("metadata") if isinstance(frontmatter.get("metadata"), dict) else {}
+    valor = frontmatter.get(clave, meta.get(clave))
+    if isinstance(valor, str):
+        v = valor.strip()
+        if v.startswith("[") and v.endswith("]"):
+            v = v[1:-1]
+        valor = [desentrecomillar(x) for x in re.split(r"[,\s]+" if por_espacios else r",", v)]
+    if not isinstance(valor, list):
+        return []
+    return sin_repetir(v.strip() for v in valor if isinstance(v, str))
 
 
 def proyecto_de_ruta(ruta_normalizada):
@@ -376,14 +545,10 @@ def formatear_fecha(valor):
 def limpiar_md(s):
     s = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", s)
     s = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", s)
-    s = re.sub(r"\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]", r"\1", s)
+    s = sin_wiki(s)
     s = s.replace("**", "").replace("`", "")
     s = re.sub(r"(?<![\w*])\*(?=\S)(.+?)(?<=\S)\*(?![\w*])", r"\1", s)
     return re.sub(r"\s+", " ", s).strip()
-
-
-def recortar(s, largo):
-    return s if len(s) <= largo else f"{s[:largo - 1].rstrip()}…"
 
 
 def primer_encabezado(cuerpo):
@@ -517,6 +682,54 @@ def fragmento(texto, inicio, fin, ancho=120):
     return ("…" if a > 0 else "") + s + ("…" if b < len(texto) else "")
 
 
+def tramos_de_codigo(texto):
+    if "`" not in texto and "~~~" not in texto:
+        return []
+    tramos = []
+    abierto = None
+    pos = 0
+    for linea in texto.split("\n"):
+        s = linea.lstrip()
+        if s.startswith("```") or s.startswith("~~~"):
+            if abierto is None:
+                abierto = pos
+            else:
+                tramos.append((abierto, pos + len(linea)))
+                abierto = None
+        elif abierto is None and "`" in linea:
+            tramos += [(pos + m.start(), pos + m.end()) for m in RE_CODIGO_EN_LINEA.finditer(linea)]
+        pos += len(linea) + 1
+    if abierto is not None:
+        tramos.append((abierto, len(texto)))
+    return tramos
+
+
+def en_codigo(tramos, posicion):
+    k = bisect.bisect_right(tramos, (posicion, float("inf"))) - 1
+    return k >= 0 and posicion < tramos[k][1]
+
+
+def partes_de_enlace(crudo):
+    destino = crudo.strip()
+    if destino.startswith("<") and destino.endswith(">"):
+        destino = destino[1:-1].strip()
+    limpio = destino.split("#")[0].split("?")[0]
+    if limpio.lower().startswith("file:"):
+        limpio = re.sub(r"^file:/*", "", limpio, flags=re.I)
+    elif RE_ESQUEMA.match(limpio):
+        return destino, None
+    return destino, urllib.parse.unquote(limpio)
+
+
+def objetivo_de(carpeta, crudo):
+    destino, limpio = partes_de_enlace(crudo)
+    if limpio is None or not limpio.lower().endswith(".md"):
+        return destino, None
+    if re.match(r"^[A-Za-z]:[\\/]", limpio):
+        return destino, os.path.normpath(limpio)
+    return destino, os.path.normpath(os.path.join(str(carpeta), limpio.lstrip("\\/") if limpio[:1] in "\\/" else limpio))
+
+
 def es_nombre(c):
     return c.isalnum() or c in "_-."
 
@@ -550,6 +763,9 @@ class Cerebro:
         self.otras = {}
         self.rotos = []
         self.rotos_vistos = set()
+        self.lugar_roto = {}
+        self.ocultas = set()
+        self.ocultas_por_nombre = {}
         self.ambiguos = []
         self.ambiguos_vistos = set()
         self.indice_roto = []
@@ -585,6 +801,7 @@ class Cerebro:
         self.tiempo_parecidas = None
         self.parecidas_recontadas = 0
         self.no_leidos = []
+        self.mal_guardadas = []
         self.sugerencias_sin_resolver = []
         self.duplicados_juntados = 0
         self.sugeridas_fundidas = 0
@@ -605,13 +822,18 @@ class Cerebro:
                     if any(fnmatch.fnmatchcase(nombre, e) for e in excluir):
                         continue
                     reclamados.add(clave)
+                    if es_oculta(ruta):
+                        self.ocultas.add(clave)
+                        self.ocultas_por_nombre.setdefault(nfc(ruta.stem.lower()), []).append(clave)
+                        continue
                     relativa = os.path.relpath(str(ruta), raiz).replace("\\", "/")
                     identificador = fuente["id"] + ":" + (alias + "/" if alias else "") + relativa
                     self.crear_nodo(fuente, ruta, identificador)
 
     def crear_nodo(self, fuente, ruta, identificador):
         try:
-            texto, tamano = leer_texto(ruta)
+            texto, tamano = leer_texto(ruta, self.mal_guardadas)
+            estado = ruta.stat()
         except OSError as error:
             self.no_leidos.append(f"{ruta} ({error})")
             return
@@ -619,7 +841,8 @@ class Cerebro:
             self.no_leidos.append(f"{ruta} (ni UTF-8 ni cp1252)")
             return
         if identificador in self.por_id:
-            avisar(f"id repetido {identificador}")
+            self.no_leidos.append(f"{ruta} (en el mapa le toca el mismo nombre que a {self.por_id[identificador]['ruta']}: "
+                                  "ponele otro alias a su carpeta en la configuración)")
             return
         texto = texto.replace("\r\n", "\n").replace("\r", "\n")
         frontmatter, cuerpo = separar_frontmatter(texto)
@@ -636,8 +859,11 @@ class Cerebro:
         else:
             tipo = "doc"
         slug = dato(frontmatter, "name") or ruta.stem
-        estado = ruta.stat()
-        modificado = datetime.datetime.fromtimestamp(estado.st_mtime).strftime("%Y-%m-%d %H:%M")
+        try:
+            modificado = datetime.datetime.fromtimestamp(estado.st_mtime).strftime("%Y-%m-%d %H:%M")
+        except (OSError, OverflowError, ValueError):
+            modificado = ""
+            self.mal_guardadas.append((str(ruta), ("fecha",)))
         del_encabezado = formatear_fecha(dato(frontmatter, "modified", True))
         if RE_FECHA.match(del_encabezado):
             modificado = max(modificado, del_encabezado)
@@ -662,6 +888,18 @@ class Cerebro:
         }
         if recortado:
             nodo["recortado"] = True
+        boveda = None if es_de_red(ruta) else boveda_de(ruta.parent)
+        if boveda:
+            nodo["obsidian"] = {"boveda": os.path.basename(boveda[0]),
+                                "archivo": os.path.relpath(str(ruta), boveda[0]).replace("\\", "/")}
+        etiquetas = [e.lstrip("#") for e in lista_de(frontmatter, "tags", True) + lista_de(frontmatter, "tag", True)]
+        del_texto = etiquetas_del_texto(cuerpo) if boveda and not fuente.get("memoria") else []
+        etiquetas = sin_repetir(e for e in etiquetas + del_texto if e)
+        if etiquetas:
+            nodo["etiquetas"] = etiquetas
+        alias = sin_repetir(lista_de(frontmatter, "aliases") + lista_de(frontmatter, "alias"))
+        if alias:
+            nodo["_alias"] = alias
         nodo["_cuerpo"] = cuerpo
         nodo["_cabeza"] = texto[:len(texto) - len(cuerpo)]
         nodo["_desfase"] = nodo["_cabeza"].count("\n")
@@ -695,16 +933,20 @@ class Cerebro:
                 t = t["hijos"].setdefault(componente, {"hijos": {}, "ids": set()})
                 t["ids"].add(identificador)
             nombre = Path(nodo["ruta"]).name
-            self.por_nombre_sin_md.setdefault(Path(nombre).stem.lower(), []).append(identificador)
+            self.por_nombre_sin_md.setdefault(nfc(Path(nombre).stem.lower()), []).append(identificador)
             m = RE_HANDOFF_ARCHIVO.match(nombre)
             if m and m.group(1) and nombre.lower() == f"{PREFIJO_HANDOFF}_{m.group(1)}.md":
                 self.handoff_por_numero[int(m.group(1))] = identificador
             if self.fuente_de[identificador].get("memoria"):
                 grupo = nodo["grupo"]
                 for s in {nodo["slug"].lower(), Path(nombre).stem.lower()}:
-                    self.slugs_memoria.setdefault(grupo, {}).setdefault(s, identificador)
                     if len(s) >= 8 and "-" in s:
                         self.slugs_mencionables.setdefault(s, set()).add(identificador)
+        for por_archivo in (True, False):
+            for nodo in self.nodos:
+                if self.fuente_de[nodo["id"]].get("memoria"):
+                    s = nfc(Path(nodo["ruta"]).stem.lower() if por_archivo else nodo["slug"].lower())
+                    self.slugs_memoria.setdefault(nodo["grupo"], {}).setdefault(s, nodo["id"])
         self.ordenar_trie(self.trie)
 
     def ordenar_trie(self, t):
@@ -744,13 +986,15 @@ class Cerebro:
         nodo = self.por_id.get(de)
         return nodo is not None and nodo["grupo"] in GRUPOS_REGISTRO
 
-    def roto(self, de, destino, clase):
+    def roto(self, de, destino, clase, posicion=None):
         llave = (de, destino.lower(), clase)
-        if self.de_registro(de):
+        if self.de_registro(de) or es_historica(self.por_id[de]):
             return
         if llave not in self.rotos_vistos:
             self.rotos_vistos.add(llave)
             self.rotos.append({"de": de, "destino": destino, "clase": clase})
+            if posicion is not None:
+                self.lugar_roto[llave] = posicion
 
     def ambiguo(self, de, mencion, candidatos):
         llave = (de, mencion.lower())
@@ -772,22 +1016,35 @@ class Cerebro:
             carpeta = Path(nodo["ruta"]).parent
             listados = set()
             spans = []
-            for m in RE_INDICE.finditer(texto):
-                titulo, destino, gancho = m.group(1), m.group(2), m.group(3)
-                spans.append((m.start(), m.end()))
-                limpio = urllib.parse.unquote(destino.split("#")[0].split("?")[0])
-                if not limpio.lower().endswith(".md") or es_de_red(limpio):
-                    continue
-                objetivo = os.path.normpath(os.path.join(str(carpeta), limpio))
-                identificador = self.por_ruta.get(normalizar(objetivo))
-                if identificador:
-                    listados.add(identificador)
-                    self.titulo_indice.setdefault(identificador, limpiar_md(titulo))
-                    self.ganchos.setdefault(identificador, (origen, limpiar_md(gancho), m.start()))
-                    self.agregar(origen, identificador, "indice", limpiar_md(gancho) or limpiar_md(titulo))
-                elif not os.path.exists(objetivo):
-                    self.indice_roto.append({"indice": origen, "destino": destino})
-                    self.roto(origen, destino, "indice")
+            for renglon in RE_RENGLON_LISTA.finditer(texto):
+                spans.append((renglon.start(), renglon.end()))
+                m = RE_INDICE.match(texto, renglon.start(), renglon.end())
+                desde = m.end(2) if m else renglon.start()
+                if m:
+                    titulo, destino, gancho = m.group(1), m.group(2), m.group(3)
+                    limpio = urllib.parse.unquote(destino.split("#")[0].split("?")[0])
+                    if limpio.lower().endswith(".md") and not es_de_red(limpio):
+                        objetivo = os.path.normpath(os.path.join(str(carpeta), limpio))
+                        identificador = self.por_ruta.get(normalizar(objetivo))
+                        if identificador:
+                            listados.add(identificador)
+                            self.titulo_indice.setdefault(identificador, limpiar_md(titulo))
+                            self.ganchos.setdefault(identificador, (origen, limpiar_md(gancho), m.start()))
+                            self.agregar(origen, identificador, "indice", limpiar_md(gancho) or limpiar_md(titulo))
+                        elif not os.path.exists(objetivo):
+                            self.indice_roto.append({"indice": origen, "destino": destino})
+                            self.roto(origen, destino, "indice", m.start(2))
+                for otro in RE_ENLACE.finditer(texto, desde, renglon.end()):
+                    destino, objetivo = objetivo_de(carpeta, otro.group(2))
+                    if not objetivo or es_de_red(destino):
+                        continue
+                    identificador = self.por_ruta.get(normalizar(objetivo))
+                    if identificador:
+                        listados.add(identificador)
+                        self.agregar(origen, identificador, "indice", fragmento(texto, otro.start(), otro.end()))
+                    elif not os.path.exists(objetivo):
+                        self.indice_roto.append({"indice": origen, "destino": destino})
+                        self.roto(origen, destino, "indice", otro.start(2))
             self.listados_por_indice[origen] = listados
             self.spans_indice[origen] = spans
         for fuente in FUENTES:
@@ -828,10 +1085,49 @@ class Cerebro:
                     if meta:
                         nodo["meta"] = recortar(meta, 300)
 
-    def resolver_wiki(self, origen, destino):
+    def raices_de(self, origen):
+        ruta = normalizar(self.por_id[origen]["ruta"])
+        return [raiz for raiz, _, _ in self.fuente_de[origen]["raices"] if ruta.startswith(f"{normalizar(raiz)}\\")]
+
+    def resolver_con_carpeta(self, origen, destino):
+        partes = [p for p in destino.replace("\\", "/").split("/") if p]
+        if not partes:
+            return None, None
+        carpeta = Path(self.por_id[origen]["ruta"]).parent
+        relativa = os.path.join(*partes) + ".md"
+        if partes[0] in (".", ".."):
+            identificador = self.por_ruta.get(normalizar(os.path.join(str(carpeta), relativa)))
+            return (identificador, None) if identificador else (None, None)
+        cola = "\\" + normalizar(relativa)
+        candidatos = [c for c in self.por_nombre_sin_md.get(partes[-1].lower(), [])
+                      if normalizar(self.por_id[c]["ruta"]).endswith(cola)]
+        if len(candidatos) <= 1:
+            return (candidatos[0] if candidatos else None), None
+        for base in self.raices_de(origen) + [str(carpeta)]:
+            identificador = self.por_ruta.get(normalizar(os.path.join(base, relativa)))
+            if identificador in candidatos:
+                return identificador, None
+        return None, candidatos
+
+    def lleva_a_oculta(self, origen, destino):
         d = destino.strip()
         if d.lower().endswith(".md"):
             d = d[:-3]
+        partes = [p for p in d.replace("\\", "/").split("/") if p]
+        if not partes or not self.ocultas:
+            return False
+        relativa = os.path.join(*partes) + ".md"
+        if partes[0] in (".", ".."):
+            return normalizar(os.path.join(str(Path(self.por_id[origen]["ruta"]).parent), relativa)) in self.ocultas
+        cola = "\\" + normalizar(relativa)
+        return any(r.endswith(cola) for r in self.ocultas_por_nombre.get(partes[-1].lower(), ()))
+
+    def resolver_wiki(self, origen, destino):
+        d = nfc(destino.strip())
+        if d.lower().endswith(".md"):
+            d = d[:-3]
+        if "/" in d or "\\" in d:
+            return self.resolver_con_carpeta(origen, d)
         dl = d.lower()
         for grupo in self.memorias_preferidas(origen):
             encontrado = self.slugs_memoria.get(grupo, {}).get(dl)
@@ -841,50 +1137,77 @@ class Cerebro:
         if len(candidatos) == 1:
             return candidatos[0], None
         if len(candidatos) > 1:
+            carpeta = Path(self.por_id[origen]["ruta"]).parent
+            boveda = None if es_de_red(str(carpeta)) else boveda_de(carpeta)
+            de_la_raiz = self.por_ruta.get(normalizar(os.path.join(boveda[0], d + ".md"))) if boveda else None
+            if de_la_raiz in candidatos:
+                return de_la_raiz, None
             mismos = self.mismo_lugar(origen, candidatos)
             if len(mismos) == 1:
                 return mismos[0], None
             return None, candidatos
         return None, None
 
-    def analizar_wiki(self, origen, texto):
+    def analizar_wiki(self, origen, texto, en_cuerpo=True):
+        codigo = tramos_de_codigo(texto)
         for m in RE_WIKI.finditer(texto):
+            if en_codigo(codigo, m.start()):
+                continue
             destino = m.group(1).strip()
             encontrado, candidatos = self.resolver_wiki(origen, destino)
             if encontrado:
                 self.agregar(origen, encontrado, "wiki", fragmento(texto, m.start(), m.end()))
             elif candidatos:
                 self.ambiguo(origen, m.group(0), candidatos)
-            else:
-                self.roto(origen, destino, "wiki")
+            elif not RE_ADJUNTO.search(destino) and not self.lleva_a_oculta(origen, destino):
+                self.roto(origen, destino, "wiki", m.start() if en_cuerpo else None)
 
-    def analizar_enlaces(self, origen, texto, spans):
+    def analizar_enlaces(self, origen, texto, spans, en_cuerpo=True):
         carpeta = Path(self.por_id[origen]["ruta"]).parent
         inicios = [a for a, _ in spans]
+        codigo = tramos_de_codigo(texto)
         for m in RE_ENLACE.finditer(texto):
             k = bisect.bisect_right(inicios, m.start()) - 1
-            if k >= 0 and m.start() < spans[k][1]:
+            if k >= 0 and m.start() < spans[k][1] or en_codigo(codigo, m.start()):
                 continue
-            destino = m.group(2).strip()
-            if destino.startswith("<") and destino.endswith(">"):
-                destino = destino[1:-1].strip()
-            limpio = destino.split("#")[0].split("?")[0]
-            if limpio.lower().startswith("file:"):
-                limpio = re.sub(r"^file:/*", "", limpio, flags=re.I)
-            elif RE_ESQUEMA.match(limpio):
-                continue
-            limpio = urllib.parse.unquote(limpio)
-            if not limpio.lower().endswith(".md"):
-                continue
-            if re.match(r"^[A-Za-z]:[\\/]", limpio):
-                objetivo = os.path.normpath(limpio)
-            else:
-                objetivo = os.path.normpath(os.path.join(str(carpeta), limpio.lstrip("\\/") if limpio[:1] in "\\/" else limpio))
-            identificador = self.por_ruta.get(normalizar(objetivo))
+            destino, objetivo = objetivo_de(carpeta, m.group(2))
+            identificador = self.por_ruta.get(normalizar(objetivo)) if objetivo else None
+            candidatos = None
+            if not identificador:
+                identificador, candidatos, oculta = self.enlace_en_boveda(origen, carpeta, partes_de_enlace(m.group(2))[1])
+                if oculta or (objetivo and normalizar(objetivo) in self.ocultas):
+                    continue
             if identificador:
                 self.agregar(origen, identificador, "enlace", fragmento(texto, m.start(), m.end()))
-            else:
-                self.roto(origen, destino, "enlace")
+            elif candidatos:
+                self.ambiguo(origen, destino, candidatos)
+            elif objetivo:
+                self.roto(origen, destino, "enlace", m.start() if en_cuerpo else None)
+
+    def enlace_lleva_a(self, origen, crudo):
+        carpeta = Path(self.por_id[origen]["ruta"]).parent
+        _, objetivo = objetivo_de(carpeta, crudo)
+        identificador = self.por_ruta.get(normalizar(objetivo)) if objetivo else None
+        return identificador or self.enlace_en_boveda(origen, carpeta, partes_de_enlace(crudo)[1])[0]
+
+    def enlace_en_boveda(self, origen, carpeta, limpio):
+        if not limpio or es_de_red(str(carpeta)) or not boveda_de(carpeta):
+            return None, None, False
+        nombre = limpio.replace("\\", "/").strip()
+        ultimo = nombre.rstrip("/").rsplit("/", 1)[-1]
+        if not ultimo or nombre.endswith("/") or RE_ADJUNTO.search(ultimo):
+            return None, None, False
+        relativa = (nombre if nombre.lower().endswith(".md") else nombre + ".md").lstrip("/")
+        for base in (boveda_de(carpeta)[0], str(carpeta)):
+            identificador = self.por_ruta.get(normalizar(os.path.join(base, relativa)))
+            if identificador:
+                return identificador, None, False
+        if self.lleva_a_oculta(origen, relativa):
+            return None, None, True
+        if "/" not in relativa:
+            identificador, candidatos = self.resolver_wiki(origen, relativa[:-3])
+            return identificador, candidatos, False
+        return None, None, False
 
     def recorrer_ruta(self, texto, inicio_nombre, nombre):
         t = self.trie["hijos"].get(nombre)
@@ -1012,18 +1335,20 @@ class Cerebro:
                 destino = self.handoff_por_numero.get(int(m.group(1)))
                 if destino:
                     self.agregar(origen, destino, "mencion", fragmento(texto, m.start(), m.end()))
+            codigo = tramos_de_codigo(texto)
             for m in RE_TOKEN.finditer(texto):
                 token = m.group(0).lower()
                 ids = self.slugs_mencionables.get(token)
                 if not ids:
                     continue
-                if texto[m.end():m.end() + 3].lower() == ".md" or texto[max(0, m.start() - 2):m.start()] == "[[":
+                if texto[m.end():m.end() + 3].lower() == ".md" or (texto[max(0, m.start() - 2):m.start()] == "[["
+                                                                   and not en_codigo(codigo, m.start())):
                     continue
                 destino = None
                 for grupo in self.memorias_preferidas(origen):
-                    propios = [c for c in ids if self.por_id[c]["grupo"] == grupo]
+                    propios = sorted(c for c in ids if self.por_id[c]["grupo"] == grupo)
                     if propios:
-                        destino = propios[0]
+                        destino = propios[0] if len(propios) == 1 else None
                         break
                 if destino:
                     self.agregar(origen, destino, "mencion", fragmento(texto, m.start(), m.end()))
@@ -1199,8 +1524,8 @@ class Cerebro:
             origen = nodo["id"]
             textos = self.textos_de[origen]
             for i, texto in enumerate(textos):
-                self.analizar_wiki(origen, texto)
-                self.analizar_enlaces(origen, texto, self.spans_indice.get(origen, []) if i == 0 else [])
+                self.analizar_wiki(origen, texto, i == 0)
+                self.analizar_enlaces(origen, texto, self.spans_indice.get(origen, []) if i == 0 else [], i == 0)
             self.analizar_menciones(origen, textos)
         self.analizar_respuestas()
         self.analizar_cadena()
@@ -1234,7 +1559,8 @@ class Cerebro:
                 con_cadena.add(de)
                 con_cadena.add(a)
         huerfanos = [n["id"] for n in self.nodos if n["id"] not in conectados and n["tipo"] not in ("indice", "instrucciones")
-                     and not (n["tipo"] == "handoff" and n["id"] in con_cadena)]
+                     and not (n["tipo"] == "handoff" and n["id"] in con_cadena)
+                     and self.fuente_de[n["id"]].get("huerfanas", True)]
         cantidades = {}
         for n in self.nodos:
             cantidades[n["grupo"]] = cantidades.get(n["grupo"], 0) + 1
@@ -1342,6 +1668,7 @@ def a_javascript(datos):
 
 def desde_disco(con_parecidas=False, con_entidades=True):
     _listados.clear()
+    _bovedas.clear()
     cerebro = Cerebro()
     cerebro.recolectar()
     cerebro.analizar(DATOS / "sugerencias.json", con_parecidas=con_parecidas, con_entidades=con_entidades)
@@ -1509,6 +1836,9 @@ def armar_parser(epilogo):
     parser.add_argument("--gancho", default="",
                         help="con --partir: lo que dice de la nota nueva el renglón del índice (si no, el principio de la "
                              "description)")
+    modo.add_argument("--chequeo", action="store_true",
+                      help="revisa la instalación (Python, configuración, notas, hooks, registro, pista, mapa, git, "
+                           "permisos y Codex) y dice qué falta en palabras simples; no cambia nada")
     modo.add_argument("--por-partir", action="store_true",
                       help="lista las memorias que están por pasar el tope de una lectura y qué pasaría a otra nota la "
                            "pasada de cada día si «partir_sola» está prendido, y lo último que partió; no cambia nada")
@@ -1602,6 +1932,9 @@ def correr_herramienta(argumentos):
     if argumentos.por_partir:
         import ordenar
         return ordenar.main_por_partir()
+    if argumentos.chequeo:
+        import chequeo
+        return chequeo.main()
     if argumentos.partir_llenas:
         import dormir
         return dormir.main_partir_llenas()
@@ -1657,6 +1990,20 @@ def correr_herramienta(argumentos):
 
 def imprimir_salud(cerebro, medico, todo, segundos):
     otras = [f"AVISO   No pude leer {linea}: el médico no la revisó." for linea in cerebro.no_leidos]
+    otras += [f"AVISO   {configuracion.archivo()}: {aviso}" for aviso in CONFIG.get("avisos", [])]
+    otras += [f"AVISO   No pude entrar a {ruta} ({motivo}): sus notas no están en el mapa ni el médico las revisó."
+              for ruta, motivo in sorted(sin_entrar.values(), key=lambda par: orden_natural(par[0]))]
+    for ruta, problema in cerebro.mal_guardadas:
+        if problema[0] == "utf16":
+            otras.append(f"AVISO   {ruta} está guardada en UTF-16: se lee bien, pero --partir y --renombrar no la tocan "
+                         "hasta que se guarde en UTF-8.")
+        elif problema[0] == "fecha":
+            otras.append(f"AVISO   {ruta} tiene una fecha de archivo que no se puede leer (de antes de 1970 o muy lejana): "
+                         "en el mapa va sin fecha, o con la «modified» del encabezado. Se arregla guardándola de nuevo.")
+        else:
+            otras.append(f"AVISO   {ruta} tiene {cantidad(problema[1], 'letra rota', 'letras rotas')} (bytes que no son "
+                         f"UTF-8; la primera en el renglón {problema[2]}): se ven como «�». Corregila a mano y "
+                         "guardala en UTF-8.")
     if delicadas:
         ejemplos = ", ".join(sorted(delicadas.values(), key=orden_natural)[:2])
         otras.append(f"Notas delicadas: {cantidad(len(delicadas), 'nota o carpeta quedó', 'notas o carpetas quedaron')} "
@@ -1760,11 +2107,31 @@ def imprimir_resumen(cerebro, datos, cantidad_sugerencias):
             print(f'  {p["ruta"]} ({p["salteadas"]} carpetas salteadas)')
 
 
+def guardar_problemas(datos, ahora=None):
+    ahora = time.time() if ahora is None else ahora
+    por_ruta = {n["ruta"]: n["id"] for n in datos["nodos"] if n.get("ruta")}
+    try:
+        import problemas
+        raices = [p["raiz"] for p in CONFIG["proyectos"]] + [str(CARPETA)]
+        memorias = {f["id"]: f.get("proyecto", "") for f in FUENTES if f.get("memoria")}
+        lista = problemas.guardar(problemas.listar(datos, memorias, raices), str(DATOS), ahora, vivas=set(por_ruta))
+    except Exception as error:
+        avisar(f"no pude guardar la lista de problemas para el aviso ({detalle(error)})")
+        return []
+    limite = ahora - DIAS_ARREGLADOS * 86400
+    return [{"t": round(a["t"]), "id": por_ruta[a["ruta"]], "tipo": a["tipo"]} for a in lista
+            if a["t"] >= limite and a.get("ruta") in por_ruta]
+
+
 def escribir_pagina(datos, plantilla, salida):
     if not plantilla.is_file():
         print(f"Error: no encuentro la plantilla {plantilla}")
         return 1
-    html = plantilla.read_text(encoding="utf-8-sig")
+    try:
+        html = plantilla_entera(plantilla)
+    except OSError as error:
+        print(f"Error: {error}")
+        return 1
     if MARCADOR not in html:
         print(f"Error: la plantilla no tiene el marcador {MARCADOR}")
         return 1
@@ -1777,19 +2144,15 @@ def escribir_pagina(datos, plantilla, salida):
         detalle = ", ".join(f"{v} {k}" for k, v in sorted(cuentas.items()))
         print(f"La plantilla todavía no dibuja {detalle}: van repetidas con la clase que sí conoce")
     datos_pagina = dict(datos, aristas=datos["aristas"] + compatibles) if compatibles else datos
+    if normalizar(salida.resolve()) == normalizar((DATOS / "cerebro.html").resolve()):
+        arreglados = guardar_problemas(datos)
+        if arreglados:
+            datos_pagina = dict(datos_pagina, arreglados=arreglados)
     locales = librerias_locales(html)
     if locales:
         html = html.replace("</head>", f"{locales}\n</head>", 1)
     html = html.replace(MARCADOR, f"window.CEREBRO = {a_javascript(datos_pagina)};", 1)
     escribir_atomico(salida, html)
-    if normalizar(salida.resolve()) == normalizar((DATOS / "cerebro.html").resolve()):
-        try:
-            import problemas
-            raices = [p["raiz"] for p in CONFIG["proyectos"]] + [str(CARPETA)]
-            memorias = {f["id"]: f.get("proyecto", "") for f in FUENTES if f.get("memoria")}
-            problemas.guardar(problemas.listar(datos, memorias, raices), str(DATOS))
-        except Exception as error:
-            avisar(f"no pude guardar la lista de problemas para el aviso ({detalle(error)})")
     tamano = salida.stat().st_size
     print(f"HTML: {salida} ({decimal(tamano / 1048576, 2)} MB)")
     return 0

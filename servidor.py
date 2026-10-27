@@ -34,6 +34,7 @@ import buscador
 import consultas
 import firmas
 import permisos
+import procesos
 import registro
 from archivos import escribir_atomico, hay_candados, leer_objeto_json, soltar_candado, tomar_candado
 from registro import T_DE_LINEA, numero
@@ -57,8 +58,8 @@ MAXIMO_FS = 5
 MOTIVOS_PISTA = ("p", "i", "a")
 DEMORA = 2
 CADA_HUELLA = 10
-EXTRAS = [cerebro.DATOS / "sugerencias.json", CARPETA / "plantilla.html", cerebro.DATOS / "hechos.json",
-          cerebro.DATOS / "descartados.json", cerebro.DATOS / "fichas.json"]
+EXTRAS = [cerebro.DATOS / "sugerencias.json", CARPETA / "plantilla.html", *sorted((CARPETA / "pagina").glob("*.js")),
+          cerebro.DATOS / "hechos.json", cerebro.DATOS / "descartados.json", cerebro.DATOS / "fichas.json"]
 DISPARADORES = {cerebro.normalizar(r) for r in EXTRAS}
 LARGO_CONSULTA = 300
 LARGO_CWD = 300
@@ -140,8 +141,8 @@ def armar_indice():
 
 def generar():
     try:
-        r = subprocess.run([sys.executable, str(CARPETA / "cerebro.py")], cwd=str(CARPETA), env=configuracion.entorno(),
-                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=ESPERA_GENERAR)
+        r = procesos.correr([sys.executable, str(CARPETA / "cerebro.py")], timeout=ESPERA_GENERAR, cwd=str(CARPETA),
+                            env=configuracion.entorno(), capture_output=True, text=True, encoding="utf-8", errors="replace")
     except subprocess.TimeoutExpired:
         print(f"No se pudo regenerar el cerebro: tardó más de {ESPERA_GENERAR // 60} minutos.")
         return False
@@ -609,8 +610,8 @@ def evento_seguro(ev):
             limpio[campo] = valor
     if ev.get("b") in COMANDOS_HISTORIA:
         limpio["b"] = ev["b"]
-    if ev.get("o") == "app":
-        limpio["o"] = "app"
+    if ev.get("o") in ("app", "codex"):
+        limpio["o"] = ev["o"]
     if limpio["k"] == "consulta" and ev.get("p") in registro.OPCIONES_CONSULTA:
         limpio["p"] = ev["p"]
     elif fase in ("inicio", "compacta") and ev.get("p") in MOTIVOS_HISTORIA:
@@ -1482,6 +1483,7 @@ def arrancar(anterior, candados, ruta_candado, puertos, abrir, solo):
         cual = f"el puerto {puertos[0]}" if len(puertos) == 1 else f"ningún puerto entre el {puertos[0]} y el {puertos[-1]}"
         print(f"No pude abrir {cual}. El sistema dijo: {falla.strerror or falla}")
         return 1
+    clave()
     lector = Lector()
     lector.cargar_historial()
     threading.Thread(target=ordenar_en_fondo, args=(lector.leidos,), daemon=True).start()

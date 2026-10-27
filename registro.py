@@ -8,6 +8,11 @@ VENTANA_CHOQUE = 15 * 60
 T_DE_LINEA = re.compile(rb'\{\s*"t"\s*:\s*(-?[0-9][0-9.eE+\-]*)')
 PRUEBAS = "sesiones-de-prueba.txt"
 RE_SESION = re.compile(r"[0-9a-f]{8}\Z")
+ORIGENES_SIN_LECTURAS = frozenset({"codex"})
+
+
+def sin_lecturas(ev):
+    return ev.get("o") in ORIGENES_SIN_LECTURAS
 
 
 def sesiones_de_prueba(en_vivo):

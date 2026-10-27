@@ -64,11 +64,16 @@ def secretos_propios():
     return [clave] if len(clave) >= 8 else []
 
 
-def tapar(texto, propios=()):
+def tapar_claves(texto, propios=()):
     for secreto in propios:
         texto = texto.replace(secreto, TAPADO)
     for patron in CLAVES:
         texto = patron.sub(TAPADO, texto)
+    return texto
+
+
+def tapar(texto, propios=()):
+    texto = tapar_claves(texto, propios)
     for patron in DATOS_SECRETOS:
         texto = patron.sub(lambda m: m.group(1) + TAPADO, texto)
     return texto

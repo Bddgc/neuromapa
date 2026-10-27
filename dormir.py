@@ -13,6 +13,8 @@ from textos import cantidad, citar, decimal, detalle, miles
 
 ARCHIVO = os.path.join("en-vivo", "dormir.json")
 MARCA = os.path.join("en-vivo", "durmiendo.txt")
+LLENA = os.path.join("en-vivo", "memoria-llena.txt")
+ESPERA_LLENA = 10 * 60
 MEMO = os.path.join("en-vivo", "dormir-claude.json")
 VERSION = 1
 CADA = 20 * 3600
@@ -71,11 +73,43 @@ def hace_falta(carpeta, ahora):
     return marca_libre(carpeta, ahora)
 
 
+def avisar_llena(carpeta, ahora=None):
+    ahora = time.time() if ahora is None else ahora
+    marca = ruta(carpeta, LLENA)
+    try:
+        permisos.crear(os.path.dirname(marca))
+        fd = os.open(marca, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError:
+        return False
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+        f.write(f"{int(ahora)}\n")
+    return True
+
+
+def llena_desde(carpeta):
+    try:
+        with open(ruta(carpeta, LLENA), encoding="utf-8") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def soltar_llena(carpeta, comienzo):
+    desde = llena_desde(carpeta)
+    if desde is not None and desde <= comienzo:
+        try:
+            os.remove(ruta(carpeta, LLENA))
+        except OSError:
+            pass
+
+
 def falta_partir(carpeta, ahora):
     datos = leer(carpeta)
     mirada = datos.get("partir_mirada")
-    return (isinstance(mirada, (int, float)) and abs(ahora - mirada) >= REINTENTO
-            and any(s.get("espera") for s in datos.get("sin_partir") or []) and marca_libre(carpeta, ahora))
+    llena = llena_desde(carpeta)
+    reintento = (isinstance(mirada, (int, float)) and abs(ahora - mirada) >= REINTENTO
+                 and any(s.get("espera") for s in datos.get("sin_partir") or []))
+    return (reintento or (llena is not None and abs(ahora - llena) >= ESPERA_LLENA)) and marca_libre(carpeta, ahora)
 
 
 def despertar(carpeta, programa, ahora=None):
@@ -319,11 +353,14 @@ def resumen_partidas(datos, comando):
     lineas = []
     if datos.get("partidas"):
         import ordenar
-        lineas = [f'Partió sola {os.path.basename(p["nota"])} (estaba al {p["lleno"]} % del tope de un Read): '
-                  f'{ordenar.lo_que_pasa(p)}; copia de antes en {p.get("respaldo", "respaldos")}.'
+        lineas = [(f'Ordenó sola el índice {os.path.basename(p["nota"])}: ' if p.get("indice") else
+                   f'Partió sola {os.path.basename(p["nota"])} (estaba al {p["lleno"]} % del tope de un Read): ')
+                  + f'{ordenar.lo_que_pasa(p)}; copia de antes en {p.get("respaldo", "respaldos")}.'
                   for p in datos["partidas"]]
     for s in datos.get("sin_partir") or []:
-        if s.get("espera"):
+        if s.get("indice"):
+            lineas.append(f'No ordenó sola el índice {os.path.basename(s["nota"])}: {s["motivo"]}.')
+        elif s.get("espera"):
             lineas.append(f'No partió sola {os.path.basename(s["nota"])} (está al {s["lleno"]} %): {s["motivo"]}.')
         elif s.get("nota"):
             lineas.append(f'No partió sola {os.path.basename(s["nota"])} (está al {s["lleno"]} %): {s["motivo"]}. A mano: '
@@ -418,16 +455,19 @@ def sonar(cerebro, carpeta, opciones, datos, comienzo):
 
 def partir_las_llenas(cerebro, comienzo):
     import cerebro as nucleo
+    soltar_llena(str(nucleo.DATOS), comienzo)
     opciones = nucleo.CONFIG.get("partir_sola")
     if not opciones:
         return [], []
     try:
         import ordenar
         ordenar.guardar_historial()
-        partidas, sin_partir = ordenar.partir_solas(cerebro, str(nucleo.DATOS), opciones, comienzo)
-        if partidas:
+        juntados, sin_juntar = ordenar.juntar_indices(cerebro, str(nucleo.DATOS), comienzo)
+        partidas, sin_partir = ordenar.partir_solas(cerebro, str(nucleo.DATOS), opciones, comienzo,
+                                                    recargar=lambda: nucleo.desde_disco(con_entidades=False))
+        if partidas or juntados:
             ordenar.guardar_historial()
-        return partidas, sin_partir
+        return juntados + partidas, sin_juntar + sin_partir
     except Exception as error:
         return [], [{"nota": "", "lleno": 0, "motivo": f"la partición automática falló ({detalle(error)})"}]
 
@@ -448,22 +488,38 @@ def aviso_partidas(carpeta, sesion, ahora=None):
     if not con_candado(carpeta, cambio):
         return None
     import ordenar
-    lineas = [f'  {os.path.basename(p["nota"])}: {ordenar.lo_que_pasa(p)}' for p in nuevas]
-    return ("Neuromapa partió sola " + cantidad(len(nuevas), "memoria que estaba", "memorias que estaban")
+    copia = os.path.dirname(nuevas[-1].get("respaldo") or "la carpeta respaldos")
+    notas = [p for p in nuevas if not p.get("indice")]
+    indices = [p for p in nuevas if p.get("indice")]
+    avisos = []
+    if notas:
+        lineas = [f'  {os.path.basename(p["nota"])}: {ordenar.lo_que_pasa(p)}' for p in notas]
+        avisos.append(
+            "Neuromapa partió sola " + cantidad(len(notas), "memoria que estaba", "memorias que estaban")
             + " por pasar el tope de un Read (lo agrega un hook y lo dice una vez por chat). No se perdió ningún renglón: "
             "lo que salió está en la nota que dice cada renglón, enlazada desde la original y desde el índice.\n"
             + "\n".join(lineas) + "\nSi ya tenías leída alguna, releela antes de editarla. Hay copia de antes en "
-            + os.path.dirname(nuevas[-1].get("respaldo") or "la carpeta respaldos") + ".")
+            + copia + ".")
+    if indices:
+        lineas = [f'  {os.path.basename(p["nota"])}: {ordenar.lo_que_pasa(p)}' for p in indices]
+        avisos.append(
+            "Neuromapa ordenó sola el índice de la memoria para que no se llene (lo agrega un hook y lo dice una vez por "
+            "chat). No se perdió ningún enlace ni lo que decía cada uno: las historias de una misma nota ahora van en un "
+            "solo renglón, «Nota, historias (archivo): [1](…) …; [2](…) …».\n"
+            + "\n".join(lineas) + "\nSi ya tenías leído el índice, releelo antes de editarlo, y al sumar una historia "
+            "agregala a ese renglón. Hay copia de antes en " + copia + ".")
+    return "\n".join(avisos)
 
 
 def main_partir_llenas():
     import cerebro as nucleo
     import configuracion
     comando = configuracion.comando()
+    comienzo = time.time()
     if not nucleo.CONFIG.get("partir_sola"):
+        soltar_llena(str(nucleo.DATOS), comienzo)
         print(f"«partir_sola» está apagado en el config.json: no parto nada. {comando} --por-partir dice qué haría.")
         return 1
-    comienzo = time.time()
     partidas, sin_partir = partir_las_llenas(nucleo.desde_disco(con_entidades=False), comienzo)
     guardado = guardar_partidas(str(nucleo.DATOS), comienzo, partidas, sin_partir)
     try:

@@ -28,5 +28,7 @@ Qué hacer con lo que marca:
 - Los «para revisar» son datos que pueden haber quedado viejos: no son urgentes. Si comprobás uno contra el código o
   git y la nota está bien como está, proponele al usuario callarlo con `neuromapa --descartar-aviso RUTA:LÍNEA
   --motivo "por qué"`; con su OK, corrélo (vuelve solo si ese renglón cambia, y `--descartados` los lista).
+- **Un renglón que dice «arreglo listo» con `--aplicar` y unos números:** la pasada de cada noche ya preparó ese
+  cambio. Mostrale al usuario qué cambia (`neuromapa --propuestas`) y corré ese `--aplicar` solo con su OK.
 
 Al terminar, resumí en pocas líneas qué arreglaste y qué quedó para el usuario.
